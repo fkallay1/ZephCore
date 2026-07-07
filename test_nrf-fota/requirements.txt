@@ -1,0 +1,5 @@
+# Python závislosti pre OTA nástroje (ota_sender.py, ota_test.py, ota_test_lora.py).
+# Inštaluj do PlatformIO penv (ten, ktorým spúšťaš testy):
+#   <penv>/Scripts/python.exe -m pip install -r tools/requirements.txt
+pyserial>=3.5
+pycryptodome>=3.20   # AES+HMAC pre --mode meshcore (šifrovaný GRP_DATA)
