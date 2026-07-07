@@ -37,7 +37,8 @@ Skupiny súborov (kanonický zoznam bude v `tools/fota_sync.py`):
 | Skupina | Súbory | Zdieľanie |
 |---|---|---|
 | 1 — platform-free | `hpatchlite/*`, `puff_stream.{c,h}`, `flasher/flasher.{c,ld}`, `FotaProtocol.h`, `FotaState.h`, `FotaBuffer.{h,cpp}`, `tools/build_flasher.py` | byte-identické, bez úprav |
-| 2 — duálne guardy | `FotaReceiver.{h,cpp}`, `FotaReceiver_signkey.cpp`, `FotaPatcher.{h,cpp}`, `FotaFs.h`, `FotaDebug.h`, `FwId.{h,cpp}`, `flash_layout.h`, `flasher_code.h` (generovaný) | byte-identické po refaktore |
+| 2 — duálne guardy | `FotaReceiver.{h,cpp}`, `FotaReceiver_signkey.cpp`, `FotaPatcher.{h,cpp}`, `FotaFs.h`, `FotaDebug.h`, `FotaCrypto.h` (nový shim), `FwId.{h,cpp}`, `flash_layout.h` | byte-identické po refaktore |
+| — generovaný | `flasher_code.h` | per-repo (iný flasher ORIGIN: MeshCore 0xEB000, ZephCore RAM) — mimo sync |
 | 3 — per-projekt glue | MeshCore: `FotaMesh.{h,cpp}`, `FotaMyMesh.{h,cpp}`, MyMesh hooky, PIO envy · ZephCore: `FotaRepeaterMesh.{h,cpp}`, RepeaterMesh hooky, Kconfig/CMake | nezdieľa sa |
 
 `tools/fota_sync.py` (v ZephCore): porovná zdieľané súbory so susedným
