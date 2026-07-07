@@ -485,6 +485,11 @@ void Dispatcher::checkSend()
 					_tx_queued_cb(retry, _tx_queued_user_data);
 				}
 			} else {
+#ifdef WITH_LORA_FOTA
+				/* Mirror of the Arduino FOTA-branch core hook: raw TX tap right
+				 * after the frame is handed to the radio (empty default). */
+				logTxRaw(raw, len);
+#endif
 				outbound_expiry = futureMillis((int)max_airtime);
 			}
 		}

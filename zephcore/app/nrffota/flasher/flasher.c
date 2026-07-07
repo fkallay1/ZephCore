@@ -362,6 +362,25 @@ void flasher_main(uint32_t patch_addr, uint32_t patch_size,
     __asm volatile ("cpsid i" ::: "memory");
     ftrace_init();        //en: erase the trace page 0xF3000
 
+#ifdef FLASHER_COPY_PATCH
+    //en: ZephCore RAM flasher: the app can NOT memmove the patch to PATCH_RAM_ADDR
+    //en: itself (it would overwrite the running kernel/thread stacks mid-copy), so
+    //en: WE move it — running from RAM code with our own SP at the top of RAM.
+    //en: dest (0x20000000) <= src (app heap, guarded < FLASHER_RAM_ADDR by the app),
+    //en: so a forward byte copy handles any overlap safely.
+    //sk: ZephCore RAM flasher: app si NEmoze patch presunut na PATCH_RAM_ADDR sam
+    //sk: (prepisal by si beziaci kernel/stack vlakna uprostred kopie), preto ho
+    //sk: presuvame MY — beziac z RAM kodu s vlastnym SP na vrchu RAM.
+    //sk: dest (0x20000000) <= src (app heap, app strazi < FLASHER_RAM_ADDR),
+    //sk: takze dopredna bajtova kopia bezpecne zvladne aj prekryv.
+    if (patch_addr != PATCH_RAM_ADDR) {
+        const uint8_t* cp_s = (const uint8_t*)patch_addr;
+        uint8_t*       cp_d = (uint8_t*)PATCH_RAM_ADDR;
+        for (uint32_t cp_i = 0; cp_i < patch_size; cp_i++) cp_d[cp_i] = cp_s[cp_i];
+        patch_addr = PATCH_RAM_ADDR;
+    }
+#endif
+
     //en: read_diff backend — depends on the patch format. For a raw patch a direct read
     //en: from RAM (PatchStream), for ZLIB streaming decompression (puff_stream).
     //sk: read_diff backend — podľa formátu patchu. Pre raw patch priame čítanie

@@ -78,6 +78,11 @@ protected:
 	}
 	virtual DispatcherAction onRecvPacket(Packet *pkt) = 0;
 	virtual void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) { (void)snr; (void)rssi; (void)raw; (void)len; }
+#ifdef WITH_LORA_FOTA
+	/* Raw TX tap, called right after a successful startSendRaw (mirror of the
+	 * Arduino FOTA-branch hook; empty default). FOTA-only, like in MeshCore. */
+	virtual void logTxRaw(const uint8_t raw[], int len) { (void)raw; (void)len; }
+#endif
 	virtual void logRx(Packet *packet, int len, float score) { (void)packet; (void)len; (void)score; }
 	virtual void logTx(Packet *packet, int len) { (void)packet; (void)len; }
 	virtual void logTxFail(Packet *packet, int len) { (void)packet; (void)len; }

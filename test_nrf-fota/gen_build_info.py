@@ -37,6 +37,21 @@ except Exception:
 COUNTER = PROJ / "test_nrf-fota" / "build_number.txt"
 HEADER  = PROJ / "test_nrf-fota" / "build_info.h"
 
+# Samostatny CLI rezim (ZephCore CMake pre-build):
+#   python gen_build_info.py --out <dir> [--counter-dir <dir>]
+# --out: kam zapisat build_info.h; --counter-dir: kde zije build_number.txt
+# (default adresar tohto skriptu — zdielane pocitadlo pre repo).
+if _env is None and __name__ == "__main__":
+    import argparse
+    _ap = argparse.ArgumentParser(description="FW build number generator (CLI rezim)")
+    _ap.add_argument("--out", required=True, help="adresar pre build_info.h")
+    _ap.add_argument("--counter-dir", default=None, help="adresar s build_number.txt")
+    _a = _ap.parse_args()
+    _cdir = Path(_a.counter_dir) if _a.counter_dir else Path(__file__).resolve().parent
+    COUNTER = _cdir / "build_number.txt"
+    _outdir = Path(_a.out); _outdir.mkdir(parents=True, exist_ok=True)
+    HEADER  = _outdir / "build_info.h"
+
 # NoBuild upload (`pio run -t nobuild -t upload`): NEkompiluje sa, takže build_info.h
 # sa nepoužije a na dosku ide POSLEDNÝ skutočne zbuildovaný firmware. Nebumpuj # —
 # inak by každý NoBuild upload míňal číslo bez zodpovedajúceho buildu (diery) a

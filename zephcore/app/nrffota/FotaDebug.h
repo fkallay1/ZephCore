@@ -24,8 +24,7 @@
   //sk: printk ide na Zephyr konzolu (USB CDC na nRF52 repeateroch); CRLF
   //sk: konce riadkov kvoli parite s Arduino vystupom v terminali.
   #define FOTA_DEBUG_PRINT(F, ...)   printk(F, ##__VA_ARGS__)
-  #define FOTA_DEBUG_PRINTLN(F, ...) printk(F "
-", ##__VA_ARGS__)
+  #define FOTA_DEBUG_PRINTLN(F, ...) printk(F "\r\n", ##__VA_ARGS__)
 #elif FOTA_DEBUG && ARDUINO
   #include <Arduino.h>
   //en: "\r\n" (CRLF) like Serial.println — a bare "\n" produces "staircase"

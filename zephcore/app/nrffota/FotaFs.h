@@ -64,6 +64,7 @@ public:
     bool begin() { fs_mkdir(FOTA_FS_DIR_MK); return true; }   //en: idempotent (-EEXIST ok)
     void end() {}      //en: /lfs stays mounted (shared); the flasher never touches it
     void format() {}
+    bool mkdir(const char* path) { return fs_mkdir(path) == 0; }   //en: -EEXIST => false, neskodne
     bool remove(const char* path) { return fs_unlink(path) == 0; }
 private:
     //en: FOTA_FS_DIR from FotaState.h is not visible here (include order) — keep literal

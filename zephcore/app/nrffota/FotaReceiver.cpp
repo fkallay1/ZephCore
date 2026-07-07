@@ -14,7 +14,13 @@
 #include "FotaFs.h"
 #include "FwId.h"             //en: fw_id_trailer (build#, image_size, sha256)
 #include "FotaDebug.h"
+#if defined(FOTA_MESHCORE_BUILD)
 #include <Arduino.h>
+#elif defined(FOTA_ZEPHCORE_BUILD)
+#include <stdio.h>       //en: sprintf (CLI replies)
+#include <stdlib.h>      //en: malloc/free (patch RAM assembly)
+#include <string.h>
+#endif
 #include "FotaCrypto.h"      //en: SHA256 + Ed25519 platform shim (rweather / PSA+Monocypher)
 
 #if defined(FOTA_MESHCORE_BUILD)

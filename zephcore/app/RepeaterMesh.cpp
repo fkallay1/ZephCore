@@ -582,6 +582,9 @@ const char* RepeaterMesh::getLogDateTime() {
 }
 
 void RepeaterMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#ifdef WITH_LORA_FOTA
+    fotaLogRxRaw(snr, rssi, raw, len);   //en: RAW diagnostics + FOTA tag (nrffota/FotaRepeaterMesh.cpp)
+#endif
 #if IS_ENABLED(CONFIG_ZEPHCORE_PACKET_LOGGING)
     /* Arduino-compatible RAW packet hex dump */
     static char hex_buf[MAX_TRANS_UNIT * 2 + 1];
@@ -805,6 +808,10 @@ void RepeaterMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
             if (is_retry) {
                 *reply = 0;
             } else {
+#ifdef WITH_LORA_FOTA
+                if (!fotaHandleLoRaCli(client, secret, command, reply,
+                                       packet->getPathHashSize(), sender_timestamp))
+#endif
                 handleCommand(sender_timestamp, command, reply);
             }
 
@@ -963,6 +970,9 @@ RepeaterMesh::RepeaterMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::Mil
 }
 
 void RepeaterMesh::begin(RepeaterDataStore* store) {
+#ifdef WITH_LORA_FOTA
+    fotaEarlyInit();   //en: flasher debug marker ASAP after boot + reset FOTA state
+#endif
     _store = store;
 
     /* Prefs and identity are loaded by the caller (main_repeater.cpp) before
@@ -999,6 +1009,9 @@ void RepeaterMesh::begin(RepeaterDataStore* store) {
 
     LOG_INF("RepeaterMesh started: %s (freq=%.2f bw=%.0f sf=%d cr=%d)",
             _prefs.node_name, (double)_prefs.freq, (double)_prefs.bw, _prefs.sf, _prefs.cr);
+#ifdef WITH_LORA_FOTA
+    fotaBegin();   //en: FOTA FS dir + channel + boot banner (nrffota/FotaRepeaterMesh.cpp)
+#endif
 #if IS_ENABLED(CONFIG_ZEPHCORE_REPEATER_UPLINK) && IS_ENABLED(CONFIG_MQTT_LIB)
     observer_creds_load(&_uplink_creds, _store->getBasePath());
     mesh::Utils::toHex(_uplink_pubkey_hex, self_id.pub_key, PUB_KEY_SIZE);
@@ -1337,6 +1350,11 @@ void RepeaterMesh::handleCommand(uint32_t sender_timestamp, char* command, char*
             strcpy(reply, "OK - Discover sent");
         }
     } else {
+#ifdef WITH_LORA_FOTA
+        if (fotaHandleCliCommand(command, reply)) {
+            return;   //en: FOTA CLI ('fota …' / legacy 'ota …') — nrffota/FotaRepeaterMesh.cpp
+        }
+#endif
         _cli.handleCommand(sender_timestamp, command, reply);
     }
 }
@@ -1394,6 +1412,10 @@ void RepeaterMesh::loop() {
 #endif
 
     timeSyncTick();
+
+#ifdef WITH_LORA_FOTA
+    fotaLoop();   //en: deferred FOTA packet/CLI/flash + heartbeat (nrffota/FotaRepeaterMesh.cpp)
+#endif
 
     uint32_t now = k_uptime_get();
     uptime_millis += now - last_millis;

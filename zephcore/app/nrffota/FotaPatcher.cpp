@@ -12,9 +12,16 @@
 #elif defined(FOTA_ZEPHCORE_BUILD)
 #include <zephyr/kernel.h>
 #include <cmsis_core.h>      //en: __disable_irq / NVIC_SystemReset / __DSB/__ISB
+#include <stdio.h>           //en: sprintf (CLI replies)
+#include <stdlib.h>          //en: malloc/free (patch RAM)
+#include <string.h>
 #endif
 #include "FotaCrypto.h"      //en: SHA256 platform shim (rweather / PSA)
+#if defined(FOTA_MESHCORE_BUILD)
 #include <nrf.h>             //en: NRF_NVMC, NVMC_CONFIG_WEN_*
+#elif defined(FOTA_FLASHER_IN_FLASH)
+#include <nrfx.h>            //en: NRF_NVMC cez hal_nordic MDK (Zephyr)
+#endif
 
 //en: HPatchLite — vendored in nrffota/hpatchlite/ (include path from build_flags)
 #if __has_include("hpatch_lite.h")

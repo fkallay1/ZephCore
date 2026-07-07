@@ -589,6 +589,46 @@ if(CONFIG_ZEPHCORE_ROLE_REPEATER)
       adapters/usb/ZephyrUSBCDC.cpp
     )
   endif()
+  # LoRa-FOTA delta patch receiver (shared sources synced from MeshCore —
+  # see zephcore/tools/fota_sync.py; glue lives in FotaRepeaterMesh.cpp)
+  if(CONFIG_ZEPHCORE_LORA_FOTA)
+    target_sources(app PRIVATE
+      app/nrffota/FotaReceiver.cpp
+      app/nrffota/FotaReceiver_signkey.cpp
+      app/nrffota/FotaPatcher.cpp
+      app/nrffota/FotaBuffer.cpp
+      app/nrffota/FwId.cpp
+      app/nrffota/FotaMesh.cpp
+      app/nrffota/FotaRepeaterMesh.cpp
+      app/nrffota/puff_stream.c
+      app/nrffota/hpatchlite/hpatch_lite.c
+    )
+    target_compile_definitions(app PRIVATE
+      WITH_LORA_FOTA=1
+      FOTA_ZEPHCORE_BUILD=1
+      FOTA_CHANNEL_NAME="${CONFIG_ZEPHCORE_FOTA_CHANNEL_NAME}"
+    )
+    if(CONFIG_ZEPHCORE_FOTA_DEBUG)
+      target_compile_definitions(app PRIVATE FOTA_DEBUG=1)
+    endif()
+    if(CONFIG_ZEPHCORE_FOTA_FLASHER_IN_FLASH)
+      target_compile_definitions(app PRIVATE FOTA_FLASHER_IN_FLASH=1)
+    endif()
+    if(CONFIG_ZEPHCORE_FOTA_FLASHER_TRACE)
+      target_compile_definitions(app PRIVATE FOTA_FLASHER_TRACE=1)
+    endif()
+    # build_info.h (FW_BUILD_NUMBER) — bumped on every build, like the Arduino
+    # pre-script; the counter lives in test_nrf-fota/build_number.txt (shared)
+    set(FOTA_GEN_DIR ${CMAKE_BINARY_DIR}/fota_gen)
+    add_custom_target(fota_build_info
+      COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../test_nrf-fota/gen_build_info.py
+              --out ${FOTA_GEN_DIR} --counter-dir ${CMAKE_CURRENT_SOURCE_DIR}/../test_nrf-fota
+      BYPRODUCTS ${FOTA_GEN_DIR}/build_info.h
+      COMMENT "FOTA: gen build_info.h (bump build number)"
+      VERBATIM)
+    add_dependencies(app fota_build_info)
+    target_include_directories(app PRIVATE ${FOTA_GEN_DIR})
+  endif()
   target_include_directories(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/adapters/usb
   )
@@ -857,4 +897,23 @@ if(ADAFRUIT_NRFUTIL AND ZEPHCORE_PLATFORM_CONF MATCHES "nrf52_common")
   message(STATUS "DFU zip generation: ENABLED (adafruit-nrfutil found)")
 else()
   message(STATUS "DFU zip generation: DISABLED (adafruit-nrfutil not found)")
+endif()
+
+# ========== Post-build: FOTA FwId trailer (hex+bin) + UF2 regen ==========
+# Fills image_size + SHA256 into the FwIdTrailer (magic FKFWID01) in zephyr.hex
+# and zephyr.bin, then REGENERATES zephyr.uf2 from the patched bin (the stock
+# UF2 is produced before this step). Must run BEFORE dfu_zip (genpkg hashes
+# the application hex).
+if(CONFIG_ZEPHCORE_LORA_FOTA)
+  add_custom_target(fota_fwid ALL
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../test_nrf-fota/gen_fw_trailer.py
+      --hex ${CMAKE_BINARY_DIR}/zephyr/zephyr.hex
+      --bin ${CMAKE_BINARY_DIR}/zephyr/zephyr.bin
+      --uf2 ${CMAKE_BINARY_DIR}/zephyr/zephyr.uf2
+    COMMENT "FOTA: FwId trailer (hex+bin) + UF2 regen"
+    VERBATIM)
+  add_dependencies(fota_fwid zephyr_final)
+  if(TARGET dfu_zip)
+    add_dependencies(dfu_zip fota_fwid)
+  endif()
 endif()

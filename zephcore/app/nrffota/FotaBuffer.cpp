@@ -7,7 +7,9 @@
 #ifdef WITH_LORA_FOTA
 #include "FotaBuffer.h"
 #include "FotaDebug.h"
+#if defined(FOTA_MESHCORE_BUILD)
 #include <Arduino.h>
+#endif
 
 //en: The only place that holds "where" the memory is. Aligned(4) for possible
 //en: future word-oriented use.

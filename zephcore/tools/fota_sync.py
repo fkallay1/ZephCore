@@ -41,6 +41,8 @@ SHARED = [
     (f"{MC_FOTA}/FotaBuffer.cpp",   f"{ZC_FOTA}/FotaBuffer.cpp"),
     (f"{MC_FOTA}/tools/build_flasher.py", f"{ZC_FOTA}/tools/build_flasher.py"),
     # skupina 2 — dualne guardy (FOTA_MESHCORE_BUILD / FOTA_ZEPHCORE_BUILD)
+    (f"{MC_FOTA}/FotaMesh.h",       f"{ZC_FOTA}/FotaMesh.h"),
+    (f"{MC_FOTA}/FotaMesh.cpp",     f"{ZC_FOTA}/FotaMesh.cpp"),
     (f"{MC_FOTA}/FotaCrypto.h",     f"{ZC_FOTA}/FotaCrypto.h"),
     (f"{MC_FOTA}/FotaFs.h",         f"{ZC_FOTA}/FotaFs.h"),
     (f"{MC_FOTA}/FotaDebug.h",      f"{ZC_FOTA}/FotaDebug.h"),

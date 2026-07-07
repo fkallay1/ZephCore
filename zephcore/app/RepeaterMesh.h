@@ -90,6 +90,13 @@ class RepeaterMesh : public mesh::Mesh, public CommonCLICallbacks {
     bool _logging;
     NodePrefs _prefs;
     ClientACL acl;
+#ifdef WITH_LORA_FOTA
+    //en: FOTA members + method/override declarations (bodies in
+    //en: app/nrffota/FotaRepeaterMesh.cpp) — raw class-body block, see its header
+    //sk: FOTA cleny + deklaracie metod/overridov (tela v
+    //sk: app/nrffota/FotaRepeaterMesh.cpp) — surovy blok tela triedy, vid hlavicku
+    #include "nrffota/FotaRepeaterMesh.h"
+#endif
     CommonCLI _cli;
     uint8_t reply_data[MAX_PACKET_PAYLOAD];
     uint8_t reply_path[MAX_PATH_SIZE];

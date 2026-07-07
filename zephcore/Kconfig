@@ -523,6 +523,57 @@ config ZEPHCORE_PACKET_LOGGING_ONLY
 
 endmenu
 
+menu "LoRa FOTA (delta patch)"
+
+config ZEPHCORE_LORA_FOTA
+	bool "LoRa-FOTA delta patch receiver (nRF52840 repeater)"
+	default n
+	depends on ZEPHCORE_ROLE_REPEATER && SOC_NRF52840
+	help
+	  Port of the MeshCore nrffota subsystem: receives a compressed
+	  HPatchLite delta patch over an encrypted GRP_DATA channel, stores
+	  it in /lfs/fota, verifies SHA256 and applies it with a standalone
+	  RAM-resident flasher. CLI: 'fota status|verify|flash|...'.
+	  Shared sources live in app/nrffota (kept byte-identical with the
+	  MeshCore repo via zephcore/tools/fota_sync.py).
+
+if ZEPHCORE_LORA_FOTA
+
+config ZEPHCORE_FOTA_DEBUG
+	bool "FOTA diagnostic prints ([FOTA] ... via printk)"
+	default y
+	help
+	  Compiles FOTA_DEBUG_PRINT/PRINTLN diagnostics ([FOTA], [FLASHER-DBG],
+	  AALIVE heartbeat) to the console. CLI replies work regardless.
+
+config ZEPHCORE_FOTA_CHANNEL_NAME
+	string "FOTA channel name (MeshCore # convention)"
+	default "#fkotanrf"
+	help
+	  Channel secret = SHA256(name)[0:16]; must match the sender
+	  (test_nrf-fota/fota_sender.py).
+
+config ZEPHCORE_FOTA_FLASHER_IN_FLASH
+	bool "Flasher blob written to a flash partition (future power-loss recovery)"
+	default n
+	help
+	  Default off: the flasher blob is copied to RAM (0x20020000) right
+	  before the jump. Enabling this requires a dedicated flasher fixed
+	  partition in the board DTS (not present in the default map) and
+	  FLASHER_CODE_ADDR passed via compile definitions.
+
+config ZEPHCORE_FOTA_FLASHER_TRACE
+	bool "Flasher debug trace page writes"
+	default n
+	help
+	  Flasher appends trace codes to a dedicated flash page. Requires
+	  FLASH_TRACE_ADDR (dedicated page) — not available in the default
+	  ZephCore flash map.
+
+endif # ZEPHCORE_LORA_FOTA
+
+endmenu
+
 menu "LoRa Power Saving"
 
 config ZEPHCORE_LORA_RX_DUTY_CYCLE
