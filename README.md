@@ -95,6 +95,9 @@ west build -b wio_tracker_l1 zephcore --pristine -- \
 west build -b rak4631 zephcore --pristine -- \
   -DEXTRA_CONF_FILE="boards/common/repeater.conf"
 
+# Repeater + LoRa-FOTA delta patch receiver (nRF52840; see zephcore/app/nrffota/README.md)
+west build -b promicro_sx1262 zephcore --pristine --   -DEXTRA_CONF_FILE="boards/common/repeater.conf;boards/common/fota.conf"
+
 # Repeater (debug logging)
 west build -b rak4631 zephcore --pristine -- \
   -DEXTRA_CONF_FILE="boards/common/repeater.conf;boards/common/debug.conf"
@@ -218,6 +221,7 @@ Key Kconfig options (set in board configs or via `-D` flags):
 | `CONFIG_ZEPHCORE_GPS_FIRST_FIX_TIMEOUT_SEC` | 300 | Cold-start window for the very first fix (longer to allow almanac download) |
 | `CONFIG_ZEPHCORE_REPEATER_GPS_INTERVAL_SEC` | 172800 | Repeater/room-server GPS duty interval boot default (48 h); 0 = always-on |
 | `CONFIG_ZEPHCORE_WIFI_OTA` | n | WiFi AP + HTTP OTA updates (ESP32 repeaters, requires `--sysbuild`) |
+| `CONFIG_ZEPHCORE_LORA_FOTA` | n | LoRa-FOTA delta-patch receiver (nRF52840 repeater) — see [`zephcore/app/nrffota/README.md`](zephcore/app/nrffota/README.md) |
 | `CONFIG_ZEPHCORE_REPEATER_UPLINK` | n | Repeater WiFi+MQTT uplink (ESP32) |
 | `CONFIG_ZEPHCORE_PACKET_LOGGING` | n | Arduino-compatible mesh packet logging |
 | `CONFIG_ZEPHCORE_HOUSEKEEPING_INTERVAL_MS` | 5000 | Periodic maintenance interval |
