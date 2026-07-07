@@ -116,3 +116,14 @@ PATH_HASH_AUDIT_INDEX.md
 MESHTIMESYNC_PLAN.md
 /meshtimesync-sim/
 releasenotes/RELEASE_NOTES_v1.16.4.md
+
+# FOTA test tooling artifacts (mirror of MeshCore .gitignore)
+test_nrf-fota/build_info.h
+test_nrf-fota/lora_old.bin
+test_nrf-fota/lora_new.bin
+test_nrf-fota/fota_patch*.bin
+test_nrf-fota/builds/
+test_nrf-fota/*.fotapkg.json
+test_nrf-fota/fotapkg_json/
+test_nrf-fota/test_key.der
+test_nrf-fota/__pycache__/
