@@ -4,12 +4,12 @@
 //en: MESHCORE: rweather/Crypto (same dep as mesh::Utils on Arduino).
 //en: ZEPHCORE: PSA Crypto (same backend as mesh::Utils) + Monocypher Ed25519.
 //en: Shared file — keep byte-identical between MeshCore and ZephCore
-//en: (tools/fota_sync.py in ZephCore).
+//en: (test_nrf-fota/fota_mczc_scr_sync.py).
 //sk: FotaCrypto.h — platformový shim pre SHA256 + Ed25519 vo FOTA kóde.
 //sk: MESHCORE: rweather/Crypto (rovnaká dep ako mesh::Utils na Arduino).
 //sk: ZEPHCORE: PSA Crypto (rovnaký backend ako mesh::Utils) + Monocypher Ed25519.
 //sk: Zdieľaný súbor — drž byte-identický medzi MeshCore a ZephCore
-//sk: (tools/fota_sync.py v ZephCore).
+//sk: (test_nrf-fota/fota_mczc_scr_sync.py).
 // =====================================================================
 #include <stdint.h>
 #include <stddef.h>

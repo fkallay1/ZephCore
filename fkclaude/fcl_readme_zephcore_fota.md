@@ -28,7 +28,7 @@ python test_nrf-fota/fota_sender.py --mode meshcore ...
 | Kconfig gate | `CONFIG_ZEPHCORE_LORA_FOTA` (default n; `boards/common/fota.conf`) |
 | Kanál | `CONFIG_ZEPHCORE_FOTA_CHANNEL_NAME`, default `#fkotanrf` |
 | FOTA dáta | `/lfs/fota/*` (zdieľaná /lfs partícia, bez zmeny flash mapy) |
-| Flasher | RAM @ 0x20020000 (blob sa kopíruje pred skokom); flash cesta za `CONFIG_ZEPHCORE_FOTA_FLASHER_IN_FLASH` (pre budúce power-loss recovery) |
+| Flasher | RAM @ 0x2003E000 — vrch RAM rezervovaný cez fota.overlay (sram0 248 kB), MPU sa pred skokom vypína; flash cesta za `CONFIG_ZEPHCORE_FOTA_FLASHER_IN_FLASH` (pre budúce power-loss recovery) |
 | Build číslo | `test_nrf-fota/build_number.txt` (zdieľané počítadlo, bump každý build) |
 | Trailer | `fota_fwid` CMake target — hex+bin+UF2 po každom builde |
 | CLI | `fota status|verify|flash|clear|miss|missall|getpath|setpath|nack|decompress|dbg|id|agc` (alias `ota`) |
@@ -42,15 +42,15 @@ Vývoj FOTA pokračuje v **MeshCore** (`D:\FkDev\FkProj\VSC\MeshCore`, vetva
 byte-identické:
 
 ```bash
-python zephcore/tools/fota_sync.py          # kontrola (exit 1 = divergencia)
-python zephcore/tools/fota_sync.py --copy   # prenos MeshCore -> ZephCore
+python test_nrf-fota/fota_mczc_scr_sync.py  # kontrola (exit 1 = divergencia)
+python test_nrf-fota/fota_mczc_scr_sync.py --copy   # prenos MeshCore -> ZephCore
 ```
 
 - Platformové rozdiely = duálne guardy `FOTA_MESHCORE_BUILD`/`FOTA_ZEPHCORE_BUILD`
   priamo v zdieľaných súboroch. Nový platformový kód pridávaj do OBOCH vetiev.
 - Per-projekt (nesyncuje sa): `FotaRepeaterMesh.{h,cpp}` (ZephCore glue),
   `FotaMyMesh.{h,cpp}` (MeshCore glue), `flasher_code.h` (generovaný — v ZephCore
-  `--origin 0x20020000 --platform zephcore`).
+  `--origin 0x2003E000 --platform zephcore`).
 - Zásahy do ZephCore kódu (Dispatcher/RepeaterMesh/…) vždy za `#ifdef WITH_LORA_FOTA`.
 
 ## Odporúčania z MeshCore testovania (platia aj tu)

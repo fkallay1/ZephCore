@@ -590,7 +590,7 @@ if(CONFIG_ZEPHCORE_ROLE_REPEATER)
     )
   endif()
   # LoRa-FOTA delta patch receiver (shared sources synced from MeshCore —
-  # see zephcore/tools/fota_sync.py; glue lives in FotaRepeaterMesh.cpp)
+  # see test_nrf-fota/fota_mczc_scr_sync.py; glue lives in FotaRepeaterMesh.cpp)
   if(CONFIG_ZEPHCORE_LORA_FOTA)
     target_sources(app PRIVATE
       app/nrffota/FotaReceiver.cpp

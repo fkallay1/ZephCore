@@ -14,8 +14,8 @@ Zdrojáky v tomto adresári sú **byte-identické** s MeshCore
 a prenáša sa sem cez:
 
 ```bash
-python zephcore/tools/fota_sync.py          # report divergencií
-python zephcore/tools/fota_sync.py --copy   # MeshCore -> ZephCore
+python test_nrf-fota/fota_mczc_scr_sync.py          # report divergencií
+python test_nrf-fota/fota_mczc_scr_sync.py --copy   # MeshCore -> ZephCore
 ```
 
 Platformové rozdiely riešia duálne guardy `FOTA_MESHCORE_BUILD` /
@@ -32,17 +32,21 @@ PC (test_nrf-fota/fota_sender.py)        ZephCore repeater (nRF52840)
   zlib(-9,wbits=-9) → staged              → deferred fota_process() v loop()
   GRP_DATA (AES-128-ECB + HMAC) ──LoRa──▶ chunky → /lfs/fota/recv.log
                                           COMPLETE → assemble + SHA256 → VERIFIED
-                                          'fota flash' → RAM flasher @ 0x20020000:
+                                          'fota flash' → RAM flasher @ 0x2003E000:
                                             HPatchLite inplaceB + puff_stream
                                             NVMC in-place zápis + FNV verify → reset
 ```
 
 - **FS:** zdieľaná `/lfs` partícia (0xD4000, 128 kB), FOTA súbory pod
   `/lfs/fota/`. Žiadna zmena flash mapy — stock aj FOTA buildy sú zameniteľné.
-- **Flasher beží z RAM** (`FLASHER_RAM_ADDR` 0x20020000, blob ~4,1 kB): app ho
-  skopíruje pred skokom, patch ostáva na heape (guard: celý pod 0x20020000)
-  a na `PATCH_RAM_ADDR` (0x20000000) si ho presunie flasher sám
-  (`FLASHER_COPY_PATCH`) — beží s vlastným SP na vrchu RAM.
+- **Flasher beží z RAM na vrchu pamäte** (`FLASHER_RAM_ADDR` 0x2003E000,
+  blob ~4,2 kB): vrchných 8 kB RAM je rezervovaných DTS overlayom
+  (`boards/common/fota.overlay`, sram0 = 248 kB), takže tam kernel nikdy nič
+  nemá. App pred skokom vypne MPU (`MPU->CTRL=0` — okno je mimo sram0 a SRAM
+  je execute-never), skopíruje blob a skočí; patch ostáva na heape (guard:
+  celý pod 0x2003E000) a na `PATCH_RAM_ADDR` (0x20000000) si ho presunie
+  flasher sám (`FLASHER_COPY_PATCH`) — jeho stack začína na code origine
+  a rastie dole do mŕtvej app RAM.
   Cesta zápisu flashera do flashu ostáva v kóde za
   `CONFIG_ZEPHCORE_FOTA_FLASHER_IN_FLASH` (budúce power-loss recovery; vyžaduje
   dedikovanú DTS partíciu). Trace stránka za `..._FLASHER_TRACE`.
@@ -58,7 +62,7 @@ PC (test_nrf-fota/fota_sender.py)        ZephCore repeater (nRF52840)
 
 ```bash
 # blob flashera (raz / po zmene flasher.c) — POZOR: iny ORIGIN nez MeshCore
-python zephcore/app/nrffota/tools/build_flasher.py --origin 0x20020000 --platform zephcore
+python zephcore/app/nrffota/tools/build_flasher.py --origin 0x2003E000 --platform zephcore
 
 # FOTA repeater (ProMicro; funguje kazdy nRF52840 board)
 west build -b promicro_sx1262 zephcore --pristine -- \

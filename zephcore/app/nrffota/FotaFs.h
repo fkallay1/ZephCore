@@ -12,7 +12,7 @@
 //en: (open/read/write/seek/size/close; FILE_O_WRITE = append semantics).
 //en:
 //en: Shared file — keep byte-identical between MeshCore and ZephCore
-//en: (tools/fota_sync.py in ZephCore). Port of FK_lora-sniffer/src/fota_fs.h.
+//en: (test_nrf-fota/fota_mczc_scr_sync.py). Port of FK_lora-sniffer/src/fota_fs.h.
 //sk: FotaFs.h — FOTA filesystem glue (platformový shim, duálne guardy).
 //sk:
 //sk: MESHCORE: dedikovaný CustomLFS na 0xD4000 (92kB) — oddelený od MeshCore
@@ -25,7 +25,7 @@
 //sk: kód používa (open/read/write/seek/size/close; FILE_O_WRITE = append).
 //sk:
 //sk: Zdieľaný súbor — drž byte-identický medzi MeshCore a ZephCore
-//sk: (tools/fota_sync.py v ZephCore). Port z FK_lora-sniffer/src/fota_fs.h.
+//sk: (test_nrf-fota/fota_mczc_scr_sync.py). Port z FK_lora-sniffer/src/fota_fs.h.
 // =====================================================================
 
 //en: Flash addresses (per-board, freestanding-safe) — single source

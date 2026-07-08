@@ -535,7 +535,7 @@ config ZEPHCORE_LORA_FOTA
 	  it in /lfs/fota, verifies SHA256 and applies it with a standalone
 	  RAM-resident flasher. CLI: 'fota status|verify|flash|...'.
 	  Shared sources live in app/nrffota (kept byte-identical with the
-	  MeshCore repo via zephcore/tools/fota_sync.py).
+	  MeshCore repo via test_nrf-fota/fota_mczc_scr_sync.py).
 
 if ZEPHCORE_LORA_FOTA
 

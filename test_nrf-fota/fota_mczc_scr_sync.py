@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""fota_sync.py — drží zdieľané FOTA súbory byte-identické MeshCore ↔ ZephCore.
+"""fota_mczc_scr_sync.py — drží zdieľané FOTA zdrojáky byte-identické
+MeshCore (MC) ↔ ZephCore (ZC).
 
 Zdroj pravdy: MeshCore (vývoj pokračuje tam, vetva features/nrf-fota*).
-Default: report divergencií (exit 1 pri rozdieloch).
+Skript je obojstranný — beží z test_nrf-fota/ ktoréhokoľvek repa a druhé repo
+si nájde ako susedný adresár (override: --meshcore / --zephcore). Kopíruje sa
+VŽDY MeshCore -> ZephCore. Sám seba má v zozname, takže sa synchronizuje tiež.
 
-  python zephcore/tools/fota_sync.py                 # diff report
-  python zephcore/tools/fota_sync.py --copy          # skopíruje MeshCore -> ZephCore
-  python zephcore/tools/fota_sync.py --meshcore D:/cesta/k/MeshCore
+  python test_nrf-fota/fota_mczc_scr_sync.py            # diff report (exit 1 pri rozdieloch)
+  python test_nrf-fota/fota_mczc_scr_sync.py --copy     # skopíruje MeshCore -> ZephCore
 
 Pozn.: flasher_code.h NIE JE v zozname — generuje sa per-repo (iný ORIGIN:
-MeshCore 0xEB000 flash, ZephCore 0x20020000 RAM). Generuj:
-  python zephcore/app/nrffota/tools/build_flasher.py --origin 0x20020000 --platform zephcore
+MeshCore 0xEB000 flash, ZephCore 0x2003E000 RAM). Generuj:
+  python zephcore/app/nrffota/tools/build_flasher.py --origin 0x2003E000 --platform zephcore
 """
 import argparse
 import filecmp
@@ -18,8 +20,8 @@ import shutil
 import sys
 from pathlib import Path
 
-ZEPH_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_MESHCORE = ZEPH_ROOT.parent / "MeshCore"
+HERE = Path(__file__).resolve().parent     # <repo>/test_nrf-fota
+REPO = HERE.parent
 
 MC_FOTA = "examples/simple_repeater/nrffota"
 ZC_FOTA = "zephcore/app/nrffota"
@@ -54,7 +56,8 @@ SHARED = [
     (f"{MC_FOTA}/FotaReceiver_signkey.cpp", f"{ZC_FOTA}/FotaReceiver_signkey.cpp"),
     (f"{MC_FOTA}/FotaPatcher.h",    f"{ZC_FOTA}/FotaPatcher.h"),
     (f"{MC_FOTA}/FotaPatcher.cpp",  f"{ZC_FOTA}/FotaPatcher.cpp"),
-    # PC tooling (byte-identicky)
+    # PC tooling (byte-identicky; vratane tohto skriptu)
+    ("test_nrf-fota/fota_mczc_scr_sync.py",    "test_nrf-fota/fota_mczc_scr_sync.py"),
     ("test_nrf-fota/fota_sender.py",           "test_nrf-fota/fota_sender.py"),
     ("test_nrf-fota/fota_sender_mcpy.py",      "test_nrf-fota/fota_sender_mcpy.py"),
     ("test_nrf-fota/fota_test_lora_repeater.py","test_nrf-fota/fota_test_lora_repeater.py"),
@@ -73,21 +76,39 @@ SHARED = [
 ]
 
 
+def detect_roots(args):
+    """Zisti, v ktorom repe skript beží, a nájdi druhé (susedné) repo."""
+    if (REPO / "zephcore" / "app").is_dir():
+        zc = REPO
+        mc = Path(args.meshcore) if args.meshcore else REPO.parent / "MeshCore"
+    elif (REPO / "examples" / "simple_repeater").is_dir():
+        mc = REPO
+        zc = Path(args.zephcore) if args.zephcore else REPO.parent / "ZephCore"
+    else:
+        sys.exit(f"[sync] neviem urcit repo pre {REPO} (ani ZephCore, ani MeshCore layout)")
+    if args.meshcore:
+        mc = Path(args.meshcore)
+    if args.zephcore:
+        zc = Path(args.zephcore)
+    return mc, zc
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--meshcore", default=str(DEFAULT_MESHCORE),
-                    help=f"cesta k MeshCore repu (default {DEFAULT_MESHCORE})")
+    ap = argparse.ArgumentParser(description="MC<->ZC FOTA source sync (kopiruje sa vzdy MC -> ZC)")
+    ap.add_argument("--meshcore", help="cesta k MeshCore repu (default: toto/susedne repo)")
+    ap.add_argument("--zephcore", help="cesta k ZephCore repu (default: toto/susedne repo)")
     ap.add_argument("--copy", action="store_true", help="skopiruj MeshCore -> ZephCore")
     args = ap.parse_args()
 
-    mc = Path(args.meshcore)
-    if not mc.is_dir():
-        print(f"[fota_sync] MeshCore nenajdeny: {mc}")
-        return 2
+    mc, zc = detect_roots(args)
+    for name, p in (("MeshCore", mc), ("ZephCore", zc)):
+        if not p.is_dir():
+            print(f"[sync] {name} nenajdeny: {p}")
+            return 2
 
     diverged, missing = [], []
     for mrel, zrel in SHARED:
-        src, dst = mc / mrel, ZEPH_ROOT / zrel
+        src, dst = mc / mrel, zc / zrel
         if not src.is_file():
             missing.append(f"MC:{mrel}")
             continue
@@ -95,17 +116,17 @@ def main() -> int:
             diverged.append((src, dst))
 
     for tag in missing:
-        print(f"[fota_sync] CHYBA zdroj: {tag}")
+        print(f"[sync] CHYBA zdroj: {tag}")
     for src, dst in diverged:
         if args.copy:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
-            print(f"[fota_sync] copy  {dst.relative_to(ZEPH_ROOT)}")
+            print(f"[sync] copy  {dst.relative_to(zc)}")
         else:
-            print(f"[fota_sync] DIFF  {dst.relative_to(ZEPH_ROOT)}")
+            print(f"[sync] DIFF  {dst.relative_to(zc)}")
 
     if not diverged and not missing:
-        print(f"[fota_sync] OK — {len(SHARED)} suborov identickych")
+        print(f"[sync] OK — {len(SHARED)} suborov identickych (MC={mc.name}, ZC={zc.name})")
         return 0
     return 0 if (args.copy and not missing) else 1
 
