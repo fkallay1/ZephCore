@@ -550,8 +550,12 @@ bool fota_flash_via_flasher() {
     sd_softdevice_disable();
 #elif defined(FOTA_ZEPHCORE_BUILD)
     //en: no SoftDevice on Zephyr; give the USB CDC console a moment to drain
+    //en: (300ms — the [OLD]/[FLASHER] diagnostics above must reach the host
+    //en: before __disable_irq kills USB)
     //sk: na Zephyre nie je SoftDevice; nechaj USB CDC konzolu dobehnut
-    k_msleep(50);
+    //sk: (300ms — [OLD]/[FLASHER] diagnostika vyssie musi stihnut dojst na
+    //sk: hosta, kym __disable_irq zabije USB)
+    k_msleep(300);
 #endif
 
     //en: After sd_disable, DISABLE IRQs before the NVMC write + jump to the flasher.
@@ -592,6 +596,17 @@ bool fota_flash_via_flasher() {
     //sk:       na patch_buf (heap, pod flasher regionom — poistka vyssie); na
     //sk:       PATCH_RAM_ADDR si ho presunie sam flasher (FLASHER_COPY_PATCH),
     //sk:       beziac s vlastnym SP na vrchu RAM. IRQ su uz vypnute.
+    //en: Zephyr ARM MPU: the flasher window (top of RAM) lies OUTSIDE the shrunk
+    //en: sram0 (fota.overlay) => the write below would MemManage-fault, and SRAM
+    //en: is execute-never => the jump would fault too. Disable the MPU — IRQs are
+    //en: already off and we never return to Zephyr.
+    //sk: Zephyr ARM MPU: flasher okno (vrch RAM) je MIMO zmenseneho sram0
+    //sk: (fota.overlay) => zapis nizsie by spadol na MemManage fault a SRAM je
+    //sk: execute-never => spadol by aj skok. Vypni MPU — IRQ su uz vypnute a do
+    //sk: Zephyru sa nevraciame.
+    MPU->CTRL = 0;
+    __DSB(); __ISB();
+
     memcpy((void*)FLASHER_RAM_ADDR, flasher_code, FLASHER_CODE_SIZE);
     __DSB(); __ISB();
 
@@ -626,6 +641,19 @@ static uint32_t s_gpret2_raw    = 0;
 static uint32_t s_resetreas_raw = 0;
 
 void fota_check_flasher_debug() {
+#if defined(FOTA_ZEPHCORE_BUILD) && defined(FLASHER_MARK_RAM_ADDR)
+    //en: RAM breadcrumb from the RAM flasher (see flasher.c fmark/FLASHER_MARK_RAM)
+    //en: — read BEFORE anything can scribble over the reserved top-of-RAM word.
+    //sk: RAM breadcrumb z RAM flashera (vid flasher.c fmark/FLASHER_MARK_RAM)
+    //sk: — precitaj SKOR, nez word na vrchu RAM niekto prepise.
+    {
+        uint32_t m = *(volatile uint32_t*)FLASHER_MARK_RAM_ADDR;
+        if ((m & 0xFFFFFF00u) == 0x464B4D00u) {
+            s_flasher_step = (uint8_t)(m & 0xFFu);
+            *(volatile uint32_t*)FLASHER_MARK_RAM_ADDR = 0;
+        }
+    }
+#endif
     s_gpret2_raw = NRF_POWER_GPREGRET2 & 0xFFu;
     if (s_gpret2_raw != 0u) {
         NRF_POWER_GPREGRET2 = 0u;          //en: clear it (SD not running yet → direct write OK)

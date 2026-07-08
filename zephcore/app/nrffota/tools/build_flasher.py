@@ -151,12 +151,17 @@ def main():
             "-DFOTA_FLASHER_BUILD",   #en: enables the bodies of flasher.c/puff_stream.c/hpatch_lite.c
             "-DHPATCH_LITE_INCLUDE_DECOMPRESS=0",
             "-DNDEBUG",              #en: disables assert() in hpatch_lite.c → no newlib I/O
-            "-DFLASHER_DEBUG=0",     #en: production: trace OFF (space), verify+DFU ON (safety)
+            #en: meshcore: trace OFF (4kB space); zephcore: trace ON (8kB region +
+            #en: free app-flash page 0xCF000) while the RAM flasher is stabilised
+            #sk: meshcore: trace OFF (4kB limit); zephcore: trace ON (8kB region +
+            #sk: volna app-flash stranka 0xCF000) pocas stabilizacie RAM flashera
+            f"-DFLASHER_DEBUG={1 if args.platform == 'zephcore' else 0}",
         ]
         if args.platform == "zephcore":
             cflags += [
                 "-DFOTA_ZEPHCORE_BUILD=1",   #en: ZephCore branch of flash_layout.h (APP_FLASH_END 0xD0000)
                 "-DFLASHER_COPY_PATCH=1",    #en: flasher moves the patch to PATCH_RAM_ADDR itself (RAM flasher)
+                "-DFLASHER_MARK_RAM=0x20036000",  #en: breadcrumb word — mrtva zona (NAD flasher .bss, POD flasher stackom, mimo bootloader startup stacku na vrchu RAM)
             ]
         cflags += [   #en: (tail kept for the comment below)
             #en: NOTE: no -DBOARD_* — the flasher does not use the APP_FLASH_START macro,
@@ -176,8 +181,8 @@ def main():
         run([LD, "-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=soft",
              "-nostdlib", "--specs=nosys.specs",
              f"-Wl,--defsym,FLASHER_ORIGIN={args.origin:#x}",
-             *([f"-Wl,--defsym,FLASHER_RAM_ORIGIN=0x20022000",
-                f"-Wl,--defsym,FLASHER_CODE_LEN=8192"] if args.platform == "zephcore" else []),
+             *([f"-Wl,--defsym,FLASHER_CODE_LEN=8192",
+                f"-Wl,--defsym,FLASHER_STACK_TOP={args.origin:#x}"] if args.platform == "zephcore" else []),
              "-T", str(FLASHER_LD),
              str(obj_hpatch), str(obj_puff), str(obj_flasher),
              "-lgcc", "-lc",

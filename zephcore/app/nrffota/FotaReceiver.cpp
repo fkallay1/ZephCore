@@ -114,7 +114,19 @@ extern "C" {
 }
 
 static inline uint32_t fw_image_size(void) {
-    return (uint32_t)((uintptr_t)__rom_region_end - (uintptr_t)__rom_region_start);
+    //en: __rom_region_end spans PAST the flashed image on Zephyr (region padding/
+    //en: alignment — measured 368640 vs real 220492 on promicro), so the linker
+    //en: span is only an upper bound. The post-build trailer carries the EXACT
+    //en: zephyr.bin size (gen_fw_trailer.py) — prefer it; fall back to the span
+    //en: for images without a filled trailer.
+    //sk: __rom_region_end siaha ZA koniec flashovaneho image na Zephyre (padding/
+    //sk: zarovnanie regionu — namerane 368640 vs realnych 220492 na promicro),
+    //sk: takze linker span je len horny odhad. Post-build trailer nesie PRESNU
+    //sk: velkost zephyr.bin (gen_fw_trailer.py) — preferuj ho; fallback na span
+    //sk: pre image bez vyplneneho traileru.
+    uint32_t span = (uint32_t)((uintptr_t)__rom_region_end - (uintptr_t)__rom_region_start);
+    uint32_t t = fw_id_trailer.image_size;
+    return (t != 0 && t <= span) ? t : span;
 }
 #endif
 

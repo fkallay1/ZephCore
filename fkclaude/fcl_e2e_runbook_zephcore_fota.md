@@ -4,11 +4,21 @@ Postup pre prvý HW test ZephCore FOTA portu. Vychádza z MeshCore runbooku
 (`../MeshCore/fkclaude/fcl_e2e_runbook_nrf-fota.md`) — topológia a bridge sú
 rovnaké, cieľ (DUT) beží ZephCore.
 
-> **STAV: HW e2e ešte NEBEŽAL.** Port je overený len buildmi (promicro stock aj
-> FOTA, pio 3 envy, pytest, fotapkg 329 B medzi #277→#278). Prvé HW kolo urob
-> manuálne po krokoch nižšie — automatický runner
-> (`fota_test_lora_repeater.py`) je stavaný na PIO build/DFU a na ZephCore
-> zatiaľ NEbol adaptovaný (build fáza by volala pio; použi manuálny postup).
+> **STAV: HW e2e PREŠIEL (2026-07-08).** Dva čisté flash cykly na ProMicro:
+> #289→#290 (po DFU baseline) a #290→#291 (čisto cez FOTA). Companion sender
+> (`fota_sender_mcpy.py`, COM3, zerohop, 869.618/62.5/SF8/CR8), patch ~340 B,
+> `fota verify` OK pred každým flashom, bežiaca SHA po flashi bit-presne sedí
+> s novým binom. Automatický runner (`fota_test_lora_repeater.py`) je stavaný
+> na PIO build/DFU a na ZephCore zatiaľ NEbol adaptovaný — použi postup nižšie.
+>
+> **Poznatky z prvého behu (už zapracované vo firmvéri):**
+> - Zephyr MPU + kernel RAM si vynútili flasher okno na VRCHU RAM (0x2003E000,
+>   rezervované cez `boards/common/fota.overlay` — sram0 248 kB) a `MPU->CTRL=0`
+>   pred skokom. Detail: MeshCore tech doc §12.
+> - Companion na COM3 občas „nevysiela" (session 0/0 alebo 1/0 po sende) —
+>   pomôže opakovaný send, prípadne reboot companiona.
+> - Breadcrumby: RAM marker 0x20036000 (`fota dbg` → „posledný krok") + flash
+>   trace @ 0xCF000 (posledná stránka app okna; zephcore blob má FLASHER_DEBUG=1).
 
 ## Topológia (rovnaká ako MeshCore)
 ```

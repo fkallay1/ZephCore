@@ -94,15 +94,40 @@
 //sk: horny limit velkosti patchu (velkost zdielanej /lfs particie)
 #define FOTA_FS_FLASH_SIZE      0x20000u
 
-//en: RAM flasher: 4kB code here, .bss+stack above (flasher.ld), patch below
-//sk: RAM flasher: 4kB kod tu, .bss+stack nad (flasher.ld), patch pod
-#define FLASHER_RAM_ADDR       0x20020000u
+//en: RAM flasher window = TOP 8kB of RAM (0x2003E000-0x20040000), RESERVED from
+//en: Zephyr via boards/common/fota.overlay (sram0 shrunk to 248kB) — the kernel
+//en: image spans past 0x20020000 (measured _image_ram_end 0x2002516c), so the
+//en: blob copy destination must live outside app RAM. Flasher stack starts AT
+//en: the code origin and grows DOWN into dead-app RAM; .bss stays at 0x20020000
+//en: (dead app RAM at run time). Breadcrumb word: code origin + 0x1F00.
+//sk: RAM flasher okno = VRCHNYCH 8kB RAM (0x2003E000-0x20040000), REZERVOVANE
+//sk: pred Zephyrom cez boards/common/fota.overlay (sram0 zmenseny na 248kB) —
+//sk: kernel image siaha za 0x20020000 (namerane _image_ram_end 0x2002516c),
+//sk: takze ciel kopie blobu musi byt mimo app RAM. Stack flashera zacina NA
+//sk: code origine a rastie DOLE do mrtvej app RAM; .bss ostava na 0x20020000
+//sk: (pocas behu flashera uz mrtva app RAM). Breadcrumb word: code origin + 0x1F00.
+#define FLASHER_RAM_ADDR       0x2003E000u
+//en: breadcrumb word OUTSIDE the top-of-RAM bootloader startup stack (SP=0x20040000
+//en: wipes the top ~kBs on every reset) — dead zone above flasher .bss, below its stack
+//sk: breadcrumb word MIMO startovacieho stacku bootloadera na vrchu RAM (SP=0x20040000
+//sk: prepise vrchne ~kB pri kazdom resete) — mrtva zona nad flasher .bss, pod jeho stackom
+#define FLASHER_MARK_RAM_ADDR  0x20036000u
 
 #if defined(FOTA_FLASHER_IN_FLASH) && !defined(FLASHER_CODE_ADDR)
   #error "FOTA_FLASHER_IN_FLASH: define FLASHER_CODE_ADDR (dedicated DTS partition)"
 #endif
-#if defined(FOTA_FLASHER_TRACE) && !defined(FLASH_TRACE_ADDR)
-  #error "FOTA_FLASHER_TRACE: define FLASH_TRACE_ADDR (dedicated flash page)"
+//en: flasher trace page = LAST page of the app window (0xCF000-0xD0000). The FW
+//en: image ends far below (~0x5E200), the in-place patcher writes only
+//en: [base, new_size) — the page is effectively free and survives power-cycle.
+//en: The flasher writes it only when built with FLASHER_DEBUG=1
+//en: (build_flasher.py --platform zephcore does this while FOTA is stabilised).
+//sk: trace stranka flashera = POSLEDNA stranka app okna (0xCF000-0xD0000). FW
+//sk: image konci hlboko pod nou (~0x5E200), in-place patcher pise len
+//sk: [base, new_size) — stranka je fakticky volna a prezije power-cycle.
+//sk: Flasher ju pise len ked je blob s FLASHER_DEBUG=1 (build_flasher.py
+//sk: --platform zephcore pocas stabilizacie FOTA).
+#ifndef FLASH_TRACE_ADDR
+  #define FLASH_TRACE_ADDR     0xCF000u
 #endif
 
 #else /* FOTA_MESHCORE_BUILD alebo standalone flasher build (FOTA_FLASHER_BUILD) */

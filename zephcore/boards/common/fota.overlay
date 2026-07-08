@@ -1,0 +1,11 @@
+/*
+ * LoRa-FOTA: reserve the TOP 8kB of RAM (0x2003E000-0x20040000) for the
+ * RAM-resident flasher (code + breadcrumb word; its stack grows DOWN from the
+ * code origin into dead-app RAM). The kernel image spans past 0x20020000, so
+ * the blob copy destination must be outside app RAM — shrinking sram0 keeps
+ * Zephyr (data/bss/heaps/stacks) away from the window while the app is alive.
+ * Auto-paired with fota.conf (zephcore_auto_pair_overlay). nRF52840 only.
+ */
+&sram0 {
+	reg = <0x20000000 0x3E000>;
+};

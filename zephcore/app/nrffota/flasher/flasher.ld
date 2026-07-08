@@ -23,6 +23,11 @@ __flasher_ram = DEFINED(FLASHER_RAM_ORIGIN) ? FLASHER_RAM_ORIGIN : 0x20020000;
 /* Velkost kodovej oblasti: flash flasher je viazany 4kB strankou (0xEB000);
  * RAM flasher (ZephCore) limit nema -> 8kB (--defsym FLASHER_CODE_LEN). */
 __flasher_code_len = DEFINED(FLASHER_CODE_LEN) ? FLASHER_CODE_LEN : 4096;
+/* Vrch stacku flashera (flasher_entry si ho nastavi sam). MeshCore default =
+ * vrch RAM (0x20040000). ZephCore RAM flasher ma KOD na vrchu RAM -> stack
+ * zacina POD kodom (--defsym FLASHER_STACK_TOP=<code origin>) a rastie dole
+ * do volnej oblasti nad .bss. */
+__flasher_stack_top = DEFINED(FLASHER_STACK_TOP) ? FLASHER_STACK_TOP : 0x20040000;
 
 MEMORY {
     CODE (rx)   : ORIGIN = __flasher_origin, LENGTH = __flasher_code_len

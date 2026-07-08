@@ -603,6 +603,9 @@ if(CONFIG_ZEPHCORE_ROLE_REPEATER)
       app/nrffota/puff_stream.c
       app/nrffota/hpatchlite/hpatch_lite.c
     )
+    # hpatchlite je vendorovana v podadresari — FotaPatcher ju hlada cez
+    # __has_include("hpatch_lite.h") (bez cesty, ako Arduino build_flags -I)
+    target_include_directories(app PRIVATE app/nrffota/hpatchlite)
     target_compile_definitions(app PRIVATE
       WITH_LORA_FOTA=1
       FOTA_ZEPHCORE_BUILD=1
