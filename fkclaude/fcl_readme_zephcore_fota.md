@@ -17,13 +17,16 @@ tak som ho nabootstrapoval (jednorazovo, mimo repa, gitignorované):
   `adafruit-nrfutil`, `meshcore` (`pip install -e ../meshcore_py`), `pytest`.
 - **`west init -l zephcore && west update`** → stiahne `zephyr/`, `modules/`,
   `bootloader/`, `tools/` (všetko gitignorované, reprodukovateľné).
-- **Zephyr SDK** `D:\FkDev\zephyr_sdk` (bez ARM toolchainu — doinštalovaný
-  `setup.cmd /t arm-zephyr-eabi /c`, vyžaduje cmake + 7z v PATH).
+- **Zephyr SDK** `D:\FkDev\zephyr-sdk` (minimal bundle, len `arm-zephyr-eabi` —
+  doinštalovaný `setup.cmd /t arm-zephyr-eabi /c`, vyžaduje cmake + 7z v PATH).
+  Registrovaný v CMake package registry (HKCU) → CMake ho nájde aj bez env
+  premennej. (`D:\FkDev\zephyr-sdk.full` = plný 12 GB bundle so všetkými
+  toolchainmi — nepoužíva sa, možno zmazať.)
 
 Buildy preto bežia s:
 ```
 PATH má D:\FkDev\FkProj\VSC\ZephCore\.venv\Scripts
-ZEPHYR_SDK_INSTALL_DIR=D:\FkDev\zephyr_sdk
+ZEPHYR_SDK_INSTALL_DIR=D:\FkDev\zephyr-sdk
 ```
 
 ## Rýchly štart

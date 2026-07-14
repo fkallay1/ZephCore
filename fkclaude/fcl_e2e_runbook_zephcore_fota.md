@@ -30,7 +30,7 @@ PC ──USB(COM3)── XIAO bridge ──LoRa(CZ)── ProMicro repeater (Zep
 - Porty identifikuj podľa VID:PID (`Get-CimInstance Win32_SerialPort`).
 
 ## Predpoklady
-1. Build prostredie: `.venv` (python 3.12 + west), SDK `D:\FkDev\zephyr_sdk`
+1. Build prostredie: `.venv` (python 3.12 + west), SDK `D:\FkDev\zephyr-sdk`
    (`$env:ZEPHYR_SDK_INSTALL_DIR`), PATH s `.venv\Scripts`.
 2. `test_nrf-fota/test_key.der` ⚠️ GITIGNORED — skopíruj z MeshCore
    (pubkey `c22f8ae0…` = `FotaReceiver_signkey.cpp`, key_id=1). Bez neho
