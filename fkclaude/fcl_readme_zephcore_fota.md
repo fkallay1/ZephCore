@@ -17,6 +17,15 @@ tak som ho nabootstrapoval (jednorazovo, mimo repa, gitignorované):
   `adafruit-nrfutil`, `meshcore` (`pip install -e ../meshcore_py`), `pytest`.
 - **`west init -l zephcore && west update`** → stiahne `zephyr/`, `modules/`,
   `bootloader/`, `tools/` (všetko gitignorované, reprodukovateľné).
+- **`west config manifest.group-filter -- "+hal,+nrf,+hal_espressif"`** — MUSÍ byť
+  nastavené (žije v gitignorovanom `.west/config`, po novom `west init` znova!).
+  Drží aktívne HAL moduly vrátane `modules/hal/espressif` — ten je POVINNÝ aj pre
+  nRF52 buildy: `zephcore/CMakeLists.txt` naň pri configure aplikuje patch
+  `patches/modules/hal-espressif/0001-ble-enc-funcs-reset.patch` (ESP32 BLE glue)
+  a bez adresára configure spadne na FATAL_ERROR. Rovnako sa patchuje
+  `modules/lib/loramac-node` (sx1276 62.5 kHz) — ten west sťahuje vždy.
+  Modifikované súbory v `modules/hal/espressif` (bt.c) a `modules/lib/loramac-node`
+  sú teda zámerné — NErobiť git restore (reaplikujú sa pri configure).
 - **Zephyr SDK** `D:\FkDev\zephyr-sdk` (minimal bundle, len `arm-zephyr-eabi` —
   doinštalovaný `setup.cmd /t arm-zephyr-eabi /c`, vyžaduje cmake + 7z v PATH).
   Registrovaný v CMake package registry (HKCU) → CMake ho nájde aj bez env
