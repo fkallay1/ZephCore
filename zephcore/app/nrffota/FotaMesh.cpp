@@ -6,6 +6,8 @@
 #include "FotaReceiver.h"
 #include "FotaPatcher.h"
 #include "FotaDebug.h"
+#include "FotaTexts.h"   //en: FOTA_TXT_* — central catalog of CLI reply texts (EN/SK)
+                         //sk: FOTA_TXT_* — centrálny katalóg textov CLI odpovedí (EN/SK)
 #if defined(FOTA_MESHCORE_BUILD)
   #include <Utils.h>
   #include <Arduino.h>
@@ -33,7 +35,7 @@ void fota_build_channel(mesh::GroupChannel& ch) {
     mesh::Utils::sha256(h, sizeof(h), ch.secret, 16);
     memcpy(ch.hash, h, PATH_HASH_SIZE);
 
-    FOTA_DEBUG_PRINTLN("[FOTA] kanál %s hash=0x%02X", name, (unsigned)ch.hash[0]);   //en: expected 0xA4 for #fkotanrf
+    FOTA_DEBUG_PRINTLN("[FOTA] channel %s hash=0x%02X", name, (unsigned)ch.hash[0]);   //en: expected 0xA4 for #fkotanrf
 }
 
 void fota_handle_command(const char* args, char* reply) {
@@ -41,7 +43,7 @@ void fota_handle_command(const char* args, char* reply) {
 
     if (*args == 0 || strcmp(args, "status") == 0) {
         const FotaState* st = fota_get_state();
-        sprintf(reply, "FOTA %u/%u st=0x%02X size=%lu err=0x%02X",
+        sprintf(reply, FOTA_TXT_STATUS_FMT,
                 (unsigned)st->recv_count, (unsigned)st->total_chunks,
                 (unsigned)st->status, (unsigned long)st->patch_size,
                 (unsigned)st->err_code);
@@ -50,8 +52,8 @@ void fota_handle_command(const char* args, char* reply) {
         char reason[48]; reason[0] = 0;
         bool ok = fota_patch_to_file(reason, sizeof(reason));
         const char* tag = ok ? "OK" : "FAIL";
-        if (reason[0]) sprintf(reply, "FOTA dry-run %s: %s", tag, reason);
-        else           sprintf(reply, "FOTA dry-run %s", tag);
+        if (reason[0]) sprintf(reply, FOTA_TXT_DRYRUN_RESULT_FMT, tag, reason);
+        else           sprintf(reply, FOTA_TXT_DRYRUN_RESULT_SHORT_FMT, tag);
     } else if (strcmp(args, "flash") == 0 || strcmp(args, "apply") == 0) {
         //en: Do NOT flash here: on success fota_apply() DOES NOT RETURN (jump to flasher
         //en: + reboot), so the ACK would never be transmitted. Send "accepted" first;
@@ -62,19 +64,19 @@ void fota_handle_command(const char* args, char* reply) {
         //sk: loop() AŽ keď ACK reálne odíde z outbound queue (fota_apply_pending()).
         if (fota_get_state()->status & FOTA_ST_VERIFIED) {
             fota_request_apply();
-            strcpy(reply, "FOTA flash accepted");
+            strcpy(reply, FOTA_TXT_FLASH_ACCEPTED);
         } else {
-            strcpy(reply, "FOTA flash: nie je VERIFIED (najprv prijmi chunky + verify)");
+            strcpy(reply, FOTA_TXT_FLASH_NOT_VERIFIED);
         }
     } else if (strcmp(args, "clear") == 0) {
         fota_clear_session();
-        strcpy(reply, "FOTA cleared");
+        strcpy(reply, FOTA_TXT_CLEARED);
     } else if (strcmp(args, "decompress") == 0 || strcmp(args, "decomp") == 0) {
         fota_debug_decompress();
-        strcpy(reply, "FOTA decompress -> serial");
+        strcpy(reply, FOTA_TXT_DECOMP_TO_SERIAL);
     } else if (strcmp(args, "nack") == 0) {
         fota_send_nack();
-        strcpy(reply, "FOTA nack -> serial");
+        strcpy(reply, FOTA_TXT_NACK_TO_SERIAL);
     } else if (strcmp(args, "miss") == 0 || strcmp(args, "missall") == 0) {
         //en: Missing items: H (META) and S (SIG) first if missing, then chunks (from 0)
         //en: as ranges — a contiguous run as "from-to" (e.g. "4-11"), a single one as "5".
@@ -96,7 +98,7 @@ void fota_handle_command(const char* args, char* reply) {
         bool any_info = st->meta_recv || st->sig_recv || st->recv_count > 0 || st->total_chunks > 0;
         if (!any_info) {
             FOTA_DEBUG_PRINTLN("[FOTA] miss Zero info yet");
-            strcpy(reply, "FOTA miss: Zero info yet");
+            strcpy(reply, FOTA_TXT_MISS_ZERO_INFO);
         } else {
             int chunk_total = (chunk_missing < 0) ? 0 : chunk_missing;
             int hs = (miss_h ? 1 : 0) + (miss_s ? 1 : 0);
@@ -137,7 +139,7 @@ void fota_handle_command(const char* args, char* reply) {
         }
     } else if (strcmp(args, "dbg") == 0) {
         fota_print_flasher_debug();
-        strcpy(reply, "FOTA dbg -> serial");
+        strcpy(reply, FOTA_TXT_DBG_TO_SERIAL);
     } else if (strcmp(args, "id") == 0 || strcmp(args, "fwid") == 0) {
         fota_print_fw_id(reply);   //en: build#, image_size, full running sha256 -> serial
     } else {
@@ -145,7 +147,7 @@ void fota_handle_command(const char* args, char* reply) {
         //en: inline in fotaHandleLoRaCli) — listed here so the usage reply advertises them.
         //sk: getpath/setpath/missall <cesta> sú len LoRa (potrebujú ACL klienta; riešené
         //sk: inline vo fotaHandleLoRaCli) — tu ich uvádzame, aby ich usage odpoveď ponúkla.
-        strcpy(reply, "FOTA: status|verify|flash|clear|decompress|nack|miss|missall [cesta]|getpath|setpath|getacl|dbg|id");
+        strcpy(reply, FOTA_TXT_USAGE);
     }
 }
 

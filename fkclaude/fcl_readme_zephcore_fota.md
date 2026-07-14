@@ -75,6 +75,18 @@ python test_nrf-fota/fota_mczc_scr_sync.py --copy   # prenos MeshCore -> ZephCor
   `--origin 0x2003E000 --platform zephcore`).
 - Zásahy do ZephCore kódu (Dispatcher/RepeaterMesh/…) vždy za `#ifdef WITH_LORA_FOTA`.
 
+## Texty CLI — FotaTexts.h (od 2026-07-14)
+
+- CLI odpovede sú centrálne v zdieľanom `app/nrffota/FotaTexts.h` (`FOTA_TXT_*`),
+  default **angličtina**; `FOTA_LANG_SK=1` (definované v `zephcore/CMakeLists.txt`
+  vo FOTA bloku) prepína na slovenčinu — správanie ako doteraz.
+- Debug hlášky (`FOTA_DEBUG_*`) sú **inline po anglicky**, nelokalizujú sa;
+  EN↔SK katalóg + miesta použitia = komentár na konci FotaTexts.h.
+- `FotaRepeaterMesh.cpp` (glue, nesyncuje sa) zrkadlí CLI texty FotaMyMesh.cpp
+  1:1 cez tie isté `FOTA_TXT_*` makrá — zmeny textov rob v OBOCH glue súboroch.
+- Strojovo parsované formáty (`FOTA n/n st=…`, `miss=`, `id b#…`) sú jazykovo
+  neutrálne — NElokalizovať (Flutter appka + test skripty).
+
 ## Odporúčania z MeshCore testovania (platia aj tu)
 
 - `agc.reset.interval` держať 0 a CAD vypnuté počas FOTA session

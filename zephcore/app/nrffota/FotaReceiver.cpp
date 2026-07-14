@@ -14,6 +14,8 @@
 #include "FotaFs.h"
 #include "FwId.h"             //en: fw_id_trailer (build#, image_size, sha256)
 #include "FotaDebug.h"
+#include "FotaTexts.h"        //en: FOTA_TXT_* — central catalog of CLI reply texts (EN/SK)
+                              //sk: FOTA_TXT_* — centrálny katalóg textov CLI odpovedí (EN/SK)
 #if defined(FOTA_MESHCORE_BUILD)
 #include <Arduino.h>
 #elif defined(FOTA_ZEPHCORE_BUILD)
@@ -182,7 +184,7 @@ void fota_print_fw_id(char* reply) {
     FOTA_DEBUG_PRINTLN("[FOTA] image_size trailer = %lu", (unsigned long)timg);
     FOTA_DEBUG_PRINTLN("[FOTA] image_size linker  = %lu", (unsigned long)link_size);
     if (timg != link_size)
-        FOTA_DEBUG_PRINTLN("[FOTA] !! POZOR: trailer != linker veľkosť — zlá board konfig?");
+        FOTA_DEBUG_PRINTLN("[FOTA] !! WARNING: trailer != linker size — wrong board config?");
     FOTA_DEBUG_PRINT("[FOTA] trailer sha256     = "); print_sha_full(fw_id_trailer.sha256);
 
     uint8_t h[32]; memset(h, 0, sizeof(h));
@@ -191,12 +193,12 @@ void fota_print_fw_id(char* reply) {
         sha.update((const void*)base, timg);
         sha.finalize(h, sizeof(h));
         FOTA_DEBUG_PRINT("[FOTA] running sha256     = "); print_sha_full(h);
-        FOTA_DEBUG_PRINTLN("[FOTA] ^ porovnaj s old_sha256 v .fotapkg.json");
+        FOTA_DEBUG_PRINTLN("[FOTA] ^ compare with old_sha256 in .fotapkg.json");
     } else {
-        FOTA_DEBUG_PRINTLN("[FOTA] running sha256: image_size neplatná");
+        FOTA_DEBUG_PRINTLN("[FOTA] running sha256: image_size invalid");
     }
     if (reply) {
-        sprintf(reply, "id b#%lu sz=%lu sha=%02X%02X%02X%02X",
+        sprintf(reply, FOTA_TXT_ID_FMT,
                 (unsigned long)build, (unsigned long)timg, h[0], h[1], h[2], h[3]);
     }
 }
@@ -208,7 +210,7 @@ void fota_print_fw_id(char* reply) {
 static bool fota_fw_size_matches(uint32_t fw_size) {
     uint32_t self = fw_image_size();
     if (fw_size == self) return true;
-    FOTA_DEBUG_PRINTLN("[FOTA] base FW: old_fw_size %lu != bežiace %lu",
+    FOTA_DEBUG_PRINTLN("[FOTA] base FW: old_fw_size %lu != running %lu",
                        (unsigned long)fw_size, (unsigned long)self);
     return false;
 }
@@ -228,7 +230,7 @@ static bool fota_base_fw_validated(uint32_t fw_size, const uint8_t* prefix) {
     }
     //en: Size changed or cache empty → recompute
     if (fw_size > (APP_FLASH_END - fw_flash_base())) {
-        FOTA_DEBUG_PRINTLN("[FOTA] base FW: fw_size %lu > app okno", (unsigned long)fw_size);
+        FOTA_DEBUG_PRINTLN("[FOTA] base FW: fw_size %lu > app window", (unsigned long)fw_size);
         return false;
     }
     FotaSha256 sha;
@@ -291,7 +293,7 @@ static void fota_clear() {
 static void fota_set_error(uint8_t code) {
     fota.status   = FOTA_ST_ERROR;
     fota.err_code = code;
-    FOTA_DEBUG_PRINTLN("[FOTA] CHYBA=0x%X", (unsigned)code);
+    FOTA_DEBUG_PRINTLN("[FOTA] ERROR=0x%X", (unsigned)code);
 }
 
 //en: Kernighan bit count
@@ -328,7 +330,7 @@ static bool save_meta() {
     FotaFS.remove(FOTA_FS_META);
     FotaFile f(FotaFS);
     if (!f.open(FOTA_FS_META, FILE_O_WRITE)) {
-        FOTA_DEBUG_PRINTLN("[FOTA] meta: zápis zlyhal"); return false;
+        FOTA_DEBUG_PRINTLN("[FOTA] meta: write failed"); return false;
     }
     bool ok = (f.write((const uint8_t*)&mp, sizeof(mp)) == (int)sizeof(mp));
     f.close();
@@ -378,7 +380,7 @@ static bool load_bitmap() {
 static bool log_append(uint16_t idx, const uint8_t* data, uint16_t data_len) {
     FotaFile f(FotaFS);
     if (!f.open(FOTA_FS_LOG, FILE_O_WRITE)) {
-        FOTA_DEBUG_PRINTLN("[FOTA] log: zápis zlyhal"); return false;
+        FOTA_DEBUG_PRINTLN("[FOTA] log: write failed"); return false;
     }
     uint8_t hdr[4];
     hdr[0] = (uint8_t)(idx);       hdr[1] = (uint8_t)(idx >> 8);
@@ -446,14 +448,14 @@ static uint32_t assemble_log_to_buf(uint8_t* buf, uint32_t cap) {
 static bool verify_log_sha() {
     FotaFile log_r(FotaFS);
     if (!log_r.open(FOTA_FS_LOG, FILE_O_READ)) {
-        FOTA_DEBUG_PRINTLN("[FOTA] log: čítanie zlyhal"); return false;
+        FOTA_DEBUG_PRINTLN("[FOTA] log: read failed"); return false;
     }
     build_log_offsets(log_r);
     FotaSha256 sha;
     uint8_t buf[FOTA_CHUNK_DATA_MAX];
     for (uint16_t i = 0; i < fota.total_chunks; i++) {
         if (s_log_data_offset[i] == 0xFFFFFFFFu) {
-            FOTA_DEBUG_PRINTLN("[FOTA] chýba chunk %u", (unsigned)i);
+            FOTA_DEBUG_PRINTLN("[FOTA] missing chunk %u", (unsigned)i);
             log_r.close(); return false;
         }
         uint16_t exp_len = chunk_exp_len(i);
@@ -465,7 +467,7 @@ static bool verify_log_sha() {
     uint8_t hash[32];
     sha.finalize(hash, sizeof(hash));
     if (memcmp(hash, fota.patch_sha256, 32) != 0) {
-        FOTA_DEBUG_PRINT("[FOTA] SHA256 NESÚHLASÍ  got=");
+        FOTA_DEBUG_PRINT("[FOTA] SHA256 MISMATCH  got=");
         for (int i = 0; i < 8; i++) { FOTA_DEBUG_PRINT("%02X", (unsigned)hash[i]); }
         FOTA_DEBUG_PRINTLN("...");
         return false;
@@ -484,15 +486,15 @@ static bool verify_log_sha() {
 // =====================================================================
 static bool assemble_and_verify() {
 #ifndef USE_PATCHBIN_FILE
-    FOTA_DEBUG_PRINTLN("[FOTA] Overujem patch SHA256 (RAM, bez patch.bin)...");
+    FOTA_DEBUG_PRINTLN("[FOTA] Verifying patch SHA256 (RAM, no patch.bin)...");
     if (!verify_log_sha()) return false;
-    FOTA_DEBUG_PRINTLN("[FOTA] patch SHA256 OK (recv.log ostáva ako zdroj)");
+    FOTA_DEBUG_PRINTLN("[FOTA] patch SHA256 OK (recv.log remains the source)");
     return true;
 #else
-    FOTA_DEBUG_PRINTLN("[FOTA] Zostavujem patch.bin...");
+    FOTA_DEBUG_PRINTLN("[FOTA] Assembling patch.bin...");
     FotaFile log_r(FotaFS);
     if (!log_r.open(FOTA_FS_LOG, FILE_O_READ)) {
-        FOTA_DEBUG_PRINTLN("[FOTA] log: čítanie zlyhal"); return false;
+        FOTA_DEBUG_PRINTLN("[FOTA] log: read failed"); return false;
     }
     build_log_offsets(log_r);
 
@@ -505,7 +507,7 @@ static bool assemble_and_verify() {
     uint8_t buf[FOTA_CHUNK_DATA_MAX];
     for (uint16_t i = 0; i < fota.total_chunks && ok; i++) {
         if (s_log_data_offset[i] == 0xFFFFFFFFu) {
-            FOTA_DEBUG_PRINTLN("[FOTA] chýba chunk %u", (unsigned)i); ok = false; break;
+            FOTA_DEBUG_PRINTLN("[FOTA] missing chunk %u", (unsigned)i); ok = false; break;
         }
         uint16_t exp_len = chunk_exp_len(i);
         log_r.seek(s_log_data_offset[i]);
@@ -516,19 +518,19 @@ static bool assemble_and_verify() {
     }
     log_r.close();
     out_f.close();
-    if (!ok) { FOTA_DEBUG_PRINTLN("[FOTA] zostava zlyhala"); return false; }
+    if (!ok) { FOTA_DEBUG_PRINTLN("[FOTA] assembly failed"); return false; }
 
     uint8_t hash[32];
     sha.finalize(hash, sizeof(hash));
     if (memcmp(hash, fota.patch_sha256, 32) != 0) {
-        FOTA_DEBUG_PRINT("[FOTA] SHA256 NESÚHLASÍ  got=");
+        FOTA_DEBUG_PRINT("[FOTA] SHA256 MISMATCH  got=");
         for (int i = 0; i < 8; i++) { FOTA_DEBUG_PRINT("%02X", (unsigned)hash[i]); }
         FOTA_DEBUG_PRINTLN("...");
         return false;
     }
     FOTA_DEBUG_PRINTLN("[FOTA] patch.bin SHA256 OK");
     FotaFS.remove(FOTA_FS_LOG);   //en: recv.log cleanup — patch.bin is the source from now on
-    FOTA_DEBUG_PRINTLN("[FOTA] recv.log zmazaný (patch.bin je zdroj)");
+    FOTA_DEBUG_PRINTLN("[FOTA] recv.log deleted (patch.bin is the source)");
     return true;
 #endif
 }
@@ -546,26 +548,26 @@ static bool assemble_and_verify() {
 uint8_t* fota_acquire_patch_ram(uint32_t* out_size) {
 #ifdef USE_PATCHBIN_FILE
     FotaFile f(FotaFS);
-    if (!f.open(FOTA_FS_PATCH, FILE_O_READ)) { FOTA_DEBUG_PRINTLN("[FOTA] patch.bin chýba"); return nullptr; }
+    if (!f.open(FOTA_FS_PATCH, FILE_O_READ)) { FOTA_DEBUG_PRINTLN("[FOTA] patch.bin missing"); return nullptr; }
     uint32_t sz = (uint32_t)f.size();
     if (sz == 0 || sz > FOTA_FS_FLASH_SIZE) { f.close(); return nullptr; }
     uint8_t* buf = (uint8_t*)malloc(sz);
-    if (!buf) { f.close(); FOTA_DEBUG_PRINTLN("[FOTA] malloc %lu B zlyhal", (unsigned long)sz); return nullptr; }
+    if (!buf) { f.close(); FOTA_DEBUG_PRINTLN("[FOTA] malloc %lu B failed", (unsigned long)sz); return nullptr; }
     bool ok = ((uint32_t)f.read(buf, sz) == sz);
     f.close();
-    if (!ok) { free(buf); FOTA_DEBUG_PRINTLN("[FOTA] čítanie patch.bin zlyhalo"); return nullptr; }
+    if (!ok) { free(buf); FOTA_DEBUG_PRINTLN("[FOTA] reading patch.bin failed"); return nullptr; }
     *out_size = sz;
     return buf;
 #else
     uint32_t sz = fota.patch_size;
-    if (sz == 0 || sz > FOTA_FS_FLASH_SIZE) { FOTA_DEBUG_PRINTLN("[FOTA] neplatná patch_size"); return nullptr; }
+    if (sz == 0 || sz > FOTA_FS_FLASH_SIZE) { FOTA_DEBUG_PRINTLN("[FOTA] invalid patch_size"); return nullptr; }
     uint8_t* buf = (uint8_t*)malloc(sz);
     if (!buf) {
-        FOTA_DEBUG_PRINTLN("[FOTA] malloc %lu B zlyhal (RAM assembly) — pre veľké patche skús -D USE_PATCHBIN_FILE", (unsigned long)sz);
+        FOTA_DEBUG_PRINTLN("[FOTA] malloc %lu B failed (RAM assembly) — for large patches try -D USE_PATCHBIN_FILE", (unsigned long)sz);
         return nullptr;
     }
     if (assemble_log_to_buf(buf, sz) != sz) {
-        free(buf); FOTA_DEBUG_PRINTLN("[FOTA] RAM assembly z recv.log zlyhala"); return nullptr;
+        free(buf); FOTA_DEBUG_PRINTLN("[FOTA] RAM assembly from recv.log failed"); return nullptr;
     }
     *out_size = sz;
     return buf;
@@ -610,10 +612,10 @@ void fota_init() {
     if (!FotaFS.begin()) {
         //en: After the flasher, 0xD4000 is overwritten with raw patch data — reformat
         //sk: Po flasheri je 0xD4000 prepísaný raw patch dátami — reformátuj
-        FOTA_DEBUG_PRINTLN("[FOTA] FS poškodený (post-flash?), reformátujem...");
+        FOTA_DEBUG_PRINTLN("[FOTA] FS corrupted (post-flash?), reformatting...");
         FotaFS.format();
         if (!FotaFS.begin()) {
-            FOTA_DEBUG_PRINTLN("[FOTA] FS: format+begin zlyhalo — FS nedostupný");
+            FOTA_DEBUG_PRINTLN("[FOTA] FS: format+begin failed — FS unavailable");
         }
     }
     FotaFS.mkdir(FOTA_FS_DIR);
@@ -908,14 +910,14 @@ static void try_verify_header() {
 
     uint32_t tc = (fota.patch_size + FOTA_CHUNK_DATA_MAX - 1u) / FOTA_CHUNK_DATA_MAX;
     if (tc == 0 || tc > FOTA_MAX_CHUNKS) {
-        FOTA_DEBUG_PRINTLN("[FOTA] HEADER: zlé total_chunks=%lu", (unsigned long)tc); return;
+        FOTA_DEBUG_PRINTLN("[FOTA] HEADER: bad total_chunks=%lu", (unsigned long)tc); return;
     }
     fota.total_chunks = (uint16_t)tc;
     fota.recv_count   = bitmap_popcount();
     fota.status       = FOTA_ST_RECEIVING;
     save_bitmap();
     save_meta();
-    FOTA_DEBUG_PRINTLN("[FOTA] HEADER OK (META+SIG overené) chunks=%lu  mám %u chunkov", (unsigned long)tc, (unsigned)fota.recv_count);
+    FOTA_DEBUG_PRINTLN("[FOTA] HEADER OK (META+SIG verified) chunks=%lu  have %u chunks", (unsigned long)tc, (unsigned)fota.recv_count);
 
     //en: Chunks may have arrived before the header → check COMPLETE right away
     //sk: Chunky mohli doraziť pred hlavičkou → over COMPLETE hneď
@@ -937,7 +939,7 @@ static void try_verify_header() {
 //sk: FOTA_PKT_HEADER = META (metadáta patchu, podpisované). Idempotentné (opätovné
 //sk: prijatie len prepíše rovnaké polia). Verify+promócia spraví try_verify_header.
 static void handle_meta(const uint8_t* plain, int plen) {
-    if (plen < (int)sizeof(FotaHeaderPkt)) { FOTA_DEBUG_PRINTLN("[FOTA] META: krátky"); return; }
+    if (plen < (int)sizeof(FotaHeaderPkt)) { FOTA_DEBUG_PRINTLN("[FOTA] META: short"); return; }
     const FotaHeaderPkt* pkt = (const FotaHeaderPkt*)plain;
 
     //en: Base FW gating — META.old_sha256 MUST match the running FW, otherwise the patch
@@ -950,7 +952,7 @@ static void handle_meta(const uint8_t* plain, int plen) {
     //sk: base_fw_size==0 a SHA sa doráta nad fw_image_size). Drop (nie ERROR) — cudzí
     //sk: paket nesmie zhodiť ani založiť NAŠU session. Vypíš (ako pri chunku).
     if (!fota_meta_base_ok(pkt->old_sha256)) {
-        FOTA_DEBUG_PRINTLN("[FOTA] META: base FW nezhoda — patch nie je pre toto zariadenie, drop");
+        FOTA_DEBUG_PRINTLN("[FOTA] META: base FW mismatch — patch is not for this device, drop");
         return;
     }
 
@@ -985,7 +987,7 @@ static void handle_meta(const uint8_t* plain, int plen) {
     memcpy(fota.old_sha256,   pkt->old_sha256,   32);
     fota.meta_recv = 1;
     if (!dup_meta) save_meta();   //en: DUP re-send → no flash write (do not stall RX)
-    FOTA_DEBUG_PRINT("[FOTA] META prijaté patch_size=%lu B  patch_sha256=", (unsigned long)pkt->patch_size);
+    FOTA_DEBUG_PRINT("[FOTA] META received patch_size=%lu B  patch_sha256=", (unsigned long)pkt->patch_size);
     for (int i = 0; i < 6; i++) { FOTA_DEBUG_PRINT("%02X", (unsigned)pkt->patch_sha256[i]); }
     FOTA_DEBUG_PRINTLN("...  %s", dup_meta ? "meta_recv=1 DUP → skip save" : "NEW/CHANGED → save");
     try_verify_header();
@@ -993,12 +995,12 @@ static void handle_meta(const uint8_t* plain, int plen) {
 
 //en: FOTA_PKT_HDR_SIG = SIG (Ed25519 signature of META). Gating via old_sha256.
 static void handle_sig(const uint8_t* plain, int plen) {
-    if (plen < (int)sizeof(FotaHdrSigPkt)) { FOTA_DEBUG_PRINTLN("[FOTA] SIG: krátky"); return; }
+    if (plen < (int)sizeof(FotaHdrSigPkt)) { FOTA_DEBUG_PRINTLN("[FOTA] SIG: short"); return; }
     const FotaHdrSigPkt* pkt = (const FotaHdrSigPkt*)plain;
 
     if (fota.meta_recv) {
         if (memcmp(fota.old_sha256, pkt->old_sha256, 32) != 0) {
-            FOTA_DEBUG_PRINTLN("[FOTA] SIG: old_sha256 nezhoda s META — drop"); return;
+            FOTA_DEBUG_PRINTLN("[FOTA] SIG: old_sha256 mismatch vs META — drop"); return;
         }
     } else if (!fota_meta_base_ok(pkt->old_sha256)) {
         //en: SIG arrived before META — verify the base FW ALWAYS (even with base_fw_size==0),
@@ -1006,7 +1008,7 @@ static void handle_sig(const uint8_t* plain, int plen) {
         //en: (SIG.old_sha256 = "the gating belongs to me".)
         //sk: SIG prišiel pred META — over base FW VŽDY (aj pri base_fw_size==0), inak by
         //sk: SIG-first založil session pre cudzí patch. (SIG.old_sha256 = "gating patrí mne".)
-        FOTA_DEBUG_PRINTLN("[FOTA] SIG: base FW nezhoda — patch nie je pre toto zariadenie, drop"); return;
+        FOTA_DEBUG_PRINTLN("[FOTA] SIG: base FW mismatch — patch is not for this device, drop"); return;
     }
     if (!(fota.status & FOTA_ST_RECEIVING)) { fota.status = FOTA_ST_RECEIVING; fota.total_chunks = 0; }
 
@@ -1018,7 +1020,7 @@ static void handle_sig(const uint8_t* plain, int plen) {
     memcpy(fota.hdr_sig, pkt->signature, 64);
     fota.sig_recv = 1;
     if (!dup_sig) save_meta();   //en: DUP re-send → no flash write (do not stall RX)
-    FOTA_DEBUG_PRINTLN("[FOTA] SIG prijaté key_id=0x%X  %s", (unsigned)pkt->key_id,
+    FOTA_DEBUG_PRINTLN("[FOTA] SIG received key_id=0x%X  %s", (unsigned)pkt->key_id,
         dup_sig ? "sig_recv=1 DUP → skip save" : "NEW/CHANGED → save");
     try_verify_header();
 }
@@ -1037,7 +1039,7 @@ static void handle_chunk(const uint8_t* plain, int plen) {
 
     //en: Base FW validation — verify that the chunk is for the FW currently on the device
     if (!fota_base_fw_validated(pkt->old_fw_size, pkt->old_sha256_prefix)) {
-        FOTA_DEBUG_PRINTLN("[FOTA] CHUNK: base FW nezhoda — drop");
+        FOTA_DEBUG_PRINTLN("[FOTA] CHUNK: base FW mismatch — drop");
         return;
     }
 
@@ -1059,7 +1061,7 @@ static void handle_chunk(const uint8_t* plain, int plen) {
         fota.status = FOTA_ST_RECEIVING;
         fota.total_chunks = 0;  //en: waiting for the HEADER (or promotion)
         save_meta();
-        FOTA_DEBUG_PRINTLN("[FOTA] CHUNK: partial session z chunku (čaká HEADER)");
+        FOTA_DEBUG_PRINTLN("[FOTA] CHUNK: partial session from a chunk (waiting for HEADER)");
     } else if (memcmp(fota.old_sha256, pkt->old_sha256_prefix, 4) != 0) {
         return;  //en: the chunk belongs to a different base FW than the running session
     }
@@ -1141,7 +1143,7 @@ static void handle_apply(const uint8_t* plain, int plen) {
     if (plen < (int)sizeof(FotaApplyPkt)) return;
     const FotaApplyPkt* pkt = (const FotaApplyPkt*)plain;
     if (memcmp(pkt->sha256, fota.patch_sha256, 32) != 0) {
-        FOTA_DEBUG_PRINTLN("[FOTA] APPLY: SHA256 nesúhlasí"); return;
+        FOTA_DEBUG_PRINTLN("[FOTA] APPLY: SHA256 mismatch"); return;
     }
     fota_apply();
 }
@@ -1155,7 +1157,7 @@ void fota_print_pkt(const uint8_t* plain, int plen, float rssi, float snr) {
 
     switch (type) {
         case FOTA_PKT_HEADER: {   //en: META
-            if (plen < (int)sizeof(FotaHeaderPkt)) { FOTA_DEBUG_PRINTLN("[FOTA] META (krátky)"); return; }
+            if (plen < (int)sizeof(FotaHeaderPkt)) { FOTA_DEBUG_PRINTLN("[FOTA] META (short)"); return; }
             const FotaHeaderPkt* p = (const FotaHeaderPkt*)plain;
             uint32_t ps; memcpy(&ps, &p->patch_size, 4);
             uint32_t tc = (ps + FOTA_CHUNK_DATA_MAX - 1u) / FOTA_CHUNK_DATA_MAX;
@@ -1167,7 +1169,7 @@ void fota_print_pkt(const uint8_t* plain, int plen, float rssi, float snr) {
             return;
         }
         case FOTA_PKT_HDR_SIG: {  //en: SIG
-            if (plen < (int)sizeof(FotaHdrSigPkt)) { FOTA_DEBUG_PRINTLN("[FOTA] SIG (krátky)"); return; }
+            if (plen < (int)sizeof(FotaHdrSigPkt)) { FOTA_DEBUG_PRINTLN("[FOTA] SIG (short)"); return; }
             const FotaHdrSigPkt* p = (const FotaHdrSigPkt*)plain;
             FOTA_DEBUG_PRINT("[FOTA] SIG  v%u  key_id=0x%X  sig=", (unsigned)p->fota_prot_inf, (unsigned)p->key_id);
             for (int i = 0; i < 4; i++) { FOTA_DEBUG_PRINT("%02X", (unsigned)p->signature[i]); }
@@ -1177,7 +1179,7 @@ void fota_print_pkt(const uint8_t* plain, int plen, float rssi, float snr) {
             return;
         }
         case FOTA_PKT_CHUNK: {
-            if (plen < (int)(sizeof(FotaChunkPkt) - FOTA_CHUNK_DATA_MAX)) { FOTA_DEBUG_PRINTLN("[FOTA] CHUNK (krátky)"); return; }
+            if (plen < (int)(sizeof(FotaChunkPkt) - FOTA_CHUNK_DATA_MAX)) { FOTA_DEBUG_PRINTLN("[FOTA] CHUNK (short)"); return; }
             const FotaChunkPkt* p = (const FotaChunkPkt*)plain;
             uint16_t dlen = (uint16_t)(plen - (int)(sizeof(FotaChunkPkt) - FOTA_CHUNK_DATA_MAX));
             uint16_t calc  = fota_crc16(p->data, dlen);
@@ -1193,12 +1195,12 @@ void fota_print_pkt(const uint8_t* plain, int plen, float rssi, float snr) {
             return;
         }
         case FOTA_PKT_APPLY: {
-            if (plen < (int)sizeof(FotaApplyPkt)) { FOTA_DEBUG_PRINTLN("[FOTA] APPLY (krátky)"); return; }
+            if (plen < (int)sizeof(FotaApplyPkt)) { FOTA_DEBUG_PRINTLN("[FOTA] APPLY (short)"); return; }
             const FotaApplyPkt* p = (const FotaApplyPkt*)plain;
             bool sha_ok = (memcmp(p->sha256, fota.patch_sha256, 32) == 0);
             FOTA_DEBUG_PRINT("[FOTA] APPLY  sha256=");
             for (int i = 0; i < 8; i++) { FOTA_DEBUG_PRINT("%02X", (unsigned)p->sha256[i]); }
-            FOTA_DEBUG_PRINTLN("%s", sha_ok ? "...  OK" : "...  NESEDÍ");
+            FOTA_DEBUG_PRINTLN("%s", sha_ok ? "...  OK" : "...  MISMATCH");
             return;
         }
         default:
@@ -1227,7 +1229,7 @@ bool fota_process(const uint8_t* plain, int plen) {
 // =====================================================================
 bool fota_apply() {
     if (!(fota.status & FOTA_ST_VERIFIED)) {
-        FOTA_DEBUG_PRINTLN("[FOTA] APPLY: nie je verifikované — spusti príjem chunkov"); return false;
+        FOTA_DEBUG_PRINTLN("[FOTA] APPLY: not verified — receive chunks first"); return false;
     }
     uint8_t prev_status = fota.status;   //en: to restore if the flash fails (base-check etc.)
     fota.status = FOTA_ST_APPLYING;
@@ -1247,7 +1249,7 @@ bool fota_apply() {
 //en: fota_clear_session — deletes the FOTA files from the FS, resets the RAM state
 // =====================================================================
 void fota_clear_session() {
-    FOTA_DEBUG_PRINTLN("[FOTA] Mazem FOTA session...");
+    FOTA_DEBUG_PRINTLN("[FOTA] Clearing FOTA session...");
     int removed = 0;
     const char* files[] = { FOTA_FS_META, FOTA_FS_BITMAP, FOTA_FS_LOG, FOTA_FS_PATCH };
     for (int i = 0; i < 4; i++) {
@@ -1257,7 +1259,7 @@ void fota_clear_session() {
         }
     }
     fota_clear();
-    FOTA_DEBUG_PRINTLN("[FOTA] Hotovo — vymazaných %d súborov", removed);
+    FOTA_DEBUG_PRINTLN("[FOTA] Done — %d files removed", removed);
 }
 
 #endif  // WITH_LORA_FOTA

@@ -41,6 +41,8 @@
 #include "FotaPatcher.h"
 #include "FotaBuffer.h"   //en: shared scratch — parking spot for the deferred CLI snapshot
 #include "FotaDebug.h"
+#include "FotaTexts.h"    //en: FOTA_TXT_* — central catalog of CLI reply texts (EN/SK)
+                          //sk: FOTA_TXT_* — centrálny katalóg textov CLI odpovedí (EN/SK)
 #include <helpers/TxtDataHelpers.h>   //en: TXT_TYPE_PLAIN / TXT_TYPE_CLI_DATA
 #include <stdio.h>
 #include <string.h>
@@ -296,7 +298,7 @@ void RepeaterMesh::onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mes
     _fota_pending_rssi = _radio->getLastRSSI();
     _fota_pending_snr  = packet->getSNR();
   } else {
-    FOTA_DEBUG_PRINTLN("[FOTA] WARN pending busy, paket zahodený");
+    FOTA_DEBUG_PRINTLN("[FOTA] WARN pending buffer busy, packet dropped");
   }
 }
 
@@ -360,15 +362,16 @@ bool RepeaterMesh::fotaHandleCliCommand(const char* command, char* reply) {
 //en: (2/4/6 hex chars) selects the hash size (1/2/3 B per hop). Hops are in the
 //en: order the REPEATER transmits them (repeater -> client). On success fills
 //en: out[] and the ENCODED path_len ((hash_size-1)<<6 | hop_count); on failure
-//en: writes a short reason into err (>= 48 B).
+//en: points *err at a static reason from FotaTexts.h (no copying).
 //sk: Parsuje čiarkový zoznam hopov ("a1,3f" / "11aa,22bb" / "112233,..."): šírka
 //sk: tokenu (2/4/6 hex znakov) určuje hash size (1/2/3 B na hop). Hopy sú v poradí,
 //sk: v akom ich REPEATER vysiela (repeater -> klient). Pri úspechu naplní out[]
-//sk: a ENCODED path_len ((hash_size-1)<<6 | hop_count); pri chybe krátky dôvod do err (>= 48 B).
+//sk: a ENCODED path_len ((hash_size-1)<<6 | hop_count); pri chybe nasmeruje *err
+//sk: na statický dôvod z FotaTexts.h (bez kopírovania).
 static bool fota_parse_path_arg(const char* s, uint8_t out[MAX_PATH_SIZE],
-                                uint8_t* encoded_len, char* err) {
+                                uint8_t* encoded_len, const char** err) {
   while (*s == ' ') s++;
-  if (*s == 0) { strcpy(err, "prazdna cesta"); return false; }
+  if (*s == 0) { *err = FOTA_TXT_ERR_PATH_EMPTY; return false; }
   int tok_w = -1, count = 0, nbytes = 0;
   const char* p = s;
   while (*p) {
@@ -379,16 +382,16 @@ static bool fota_parse_path_arg(const char* s, uint8_t out[MAX_PATH_SIZE],
       int v = (c >= '0' && c <= '9') ? c - '0'
             : (c >= 'a' && c <= 'f') ? c - 'a' + 10
             : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
-      if (v < 0) { sprintf(err, "zly hex znak '%c'", c); return false; }
-      if (w >= 6) { strcpy(err, "hop > 3B"); return false; }
+      if (v < 0) { *err = FOTA_TXT_ERR_PATH_NOT_HEX; return false; }
+      if (w >= 6) { *err = FOTA_TXT_ERR_HOP_TOO_BIG; return false; }
       if ((w & 1) == 0) tokbytes[w / 2] = (uint8_t)(v << 4);
       else              tokbytes[w / 2] |= (uint8_t)v;
       w++; p++;
     }
-    if (w != 2 && w != 4 && w != 6) { strcpy(err, "hop musi mat 2/4/6 hex znakov"); return false; }
+    if (w != 2 && w != 4 && w != 6) { *err = FOTA_TXT_ERR_HOP_WIDTH; return false; }
     if (tok_w < 0) tok_w = w;
-    else if (w != tok_w) { strcpy(err, "hopy maju roznu dlzku"); return false; }
-    if (count >= 63 || nbytes + w / 2 > MAX_PATH_SIZE) { strcpy(err, "cesta pridlha"); return false; }
+    else if (w != tok_w) { *err = FOTA_TXT_ERR_HOPS_MIXED; return false; }
+    if (count >= 63 || nbytes + w / 2 > MAX_PATH_SIZE) { *err = FOTA_TXT_ERR_PATH_TOO_LONG; return false; }
     memcpy(&out[nbytes], tokbytes, w / 2);
     nbytes += w / 2;
     count++;
@@ -452,11 +455,11 @@ bool RepeaterMesh::fotaHandleLoRaCli(ClientInfo* client, const uint8_t* secret,
       //en: Report the ACL out_path for THIS client (what the repeater replies along).
       //sk: Vypíš ACL out_path pre TOHTO klienta (kadiaľ mu repeater odpovedá).
       if (client->out_path_len == OUT_PATH_UNKNOWN) {
-        strcpy(reply, "FOTA path: unknown (reply=flood)");
+        strcpy(reply, FOTA_TXT_PATH_UNKNOWN);
       } else {
         uint8_t hs  = (uint8_t)((client->out_path_len >> 6) + 1);
         uint8_t cnt = (uint8_t)(client->out_path_len & 63);
-        char* p = reply + sprintf(reply, "FOTA path (%uB,%u):", (unsigned)hs, (unsigned)cnt);
+        char* p = reply + sprintf(reply, FOTA_TXT_PATH_HEADER_FMT, (unsigned)hs, (unsigned)cnt);
         for (uint8_t i = 0; i < cnt; i++) {
           if (p - reply > 150) { *p++ = '+'; break; }   //en: LoRa reply cap  //sk: strop LoRa odpovede
           *p++ = (i == 0) ? ' ' : ',';
@@ -468,19 +471,19 @@ bool RepeaterMesh::fotaHandleLoRaCli(ClientInfo* client, const uint8_t* secret,
     }
 
     if (strncmp(a, "setpath", 7) == 0 && (a[7] == ' ' || a[7] == 0)) {
-      uint8_t path[MAX_PATH_SIZE]; uint8_t enc; char err[48];
+      uint8_t path[MAX_PATH_SIZE]; uint8_t enc; const char* err = "";
       const char* arg = a + 7;
       while (*arg == ' ') arg++;
       if (*arg == 0) {
-        strcpy(reply, "FOTA setpath: zadaj hopy nn,nn / nnnn,... / nnnnnn,... (1-3B)");
-      } else if (!fota_parse_path_arg(arg, path, &enc, err)) {
-        sprintf(reply, "FOTA setpath ERR: %s", err);
+        strcpy(reply, FOTA_TXT_SETPATH_USAGE);
+      } else if (!fota_parse_path_arg(arg, path, &enc, &err)) {
+        sprintf(reply, FOTA_TXT_SETPATH_ERR_FMT, err);
       } else {
         uint8_t hs = (uint8_t)((enc >> 6) + 1), cnt = (uint8_t)(enc & 63);
         memcpy(client->out_path, path, (size_t)cnt * hs);
         client->out_path_len = enc;
-        FOTA_DEBUG_PRINTLN("[FOTA] setpath: %u hopov (hs=%u) ulozene do ACL", (unsigned)cnt, (unsigned)hs);
-        sprintf(reply, "FOTA setpath OK: %u %s (%uB)", (unsigned)cnt, cnt == 1 ? "hop" : "hopy", (unsigned)hs);
+        FOTA_DEBUG_PRINTLN("[FOTA] setpath: %u hops (hs=%u) stored into ACL", (unsigned)cnt, (unsigned)hs);
+        sprintf(reply, FOTA_TXT_SETPATH_OK_FMT, (unsigned)cnt, cnt == 1 ? FOTA_TXT_HOP_SG : FOTA_TXT_HOP_PL, (unsigned)hs);
       }
       return true;
     }
@@ -492,21 +495,21 @@ bool RepeaterMesh::fotaHandleLoRaCli(ClientInfo* client, const uint8_t* secret,
       //sk: missall so spätnou cestou: cestu najprv ulož do ACL a defer-ni holé
       //sk: "missall" — defer snapshot nižšie skopíruje ČERSTVÝ out_path, takže
       //sk: (potenciálne dlhý) zoznam chýbajúcich ide späť už DIRECT.
-      uint8_t path[MAX_PATH_SIZE]; uint8_t enc; char err[48];
-      if (!fota_parse_path_arg(a + 8, path, &enc, err)) {
-        sprintf(reply, "FOTA missall ERR cesta: %s", err);
+      uint8_t path[MAX_PATH_SIZE]; uint8_t enc; const char* err = "";
+      if (!fota_parse_path_arg(a + 8, path, &enc, &err)) {
+        sprintf(reply, FOTA_TXT_MISSALL_PATH_ERR_FMT, err);
         return true;
       }
       uint8_t hs = (uint8_t)((enc >> 6) + 1), cnt = (uint8_t)(enc & 63);
       memcpy(client->out_path, path, (size_t)cnt * hs);
       client->out_path_len = enc;
-      FOTA_DEBUG_PRINTLN("[FOTA] missall: cesta %u hopov (hs=%u) ulozena do ACL", (unsigned)cnt, (unsigned)hs);
+      FOTA_DEBUG_PRINTLN("[FOTA] missall: path of %u hops (hs=%u) stored into ACL", (unsigned)cnt, (unsigned)hs);
       fargs = " missall";
     }
   }
 
   if (_fota_cli_pending) {
-    strcpy(reply, "FOTA: zaneprázdnené, skús neskôr");
+    strcpy(reply, FOTA_TXT_BUSY);
   } else if (deferFotaCli(client, secret, fargs, path_hash_size, sender_timestamp, tag)) {
 #ifdef FOTA_INFO_MSG
     //en: Optional intermediate "processing" packet. DEFAULT OFF: through a repeater two
@@ -515,12 +518,12 @@ bool RepeaterMesh::fotaHandleLoRaCli(ClientInfo* client, const uint8_t* secret,
     //sk: Voliteľný medzi-paket "spracúvam". DEFAULT VYP: cez repeater idú dva
     //sk: pakety (tento + výsledok z loop()) tesne za sebou a druhý — podstatný
     //sk: — sa môže stratiť. Bez flagu pošleme len jeden paket: finálny výsledok.
-    strcpy(reply, "FOTA: spracúvam, výsledok o chvíľu...");
+    strcpy(reply, FOTA_TXT_PROCESSING);
 #else
     reply_all[0] = 0;   //en: no intermediate packet (not even a bare tag); the reply is sent only once, from loop()
 #endif
   } else {
-    strcpy(reply, "FOTA: defer zlyhal (buffer)");
+    strcpy(reply, FOTA_TXT_DEFER_FAILED);
   }
   return true;
 }
@@ -541,7 +544,7 @@ bool RepeaterMesh::fotaHandleLoRaCli(ClientInfo* client, const uint8_t* secret,
 //sk: Naformátuj out_path klienta ako "(1B,2): a1,3f" (alebo "unknown") do buf.
 static const char* fota_client_path_str(const ClientInfo* c, char* buf, int cap) {
   if (c->out_path_len == OUT_PATH_UNKNOWN) {
-    strncpy(buf, "unknown", cap); buf[cap - 1] = 0; return buf;
+    strncpy(buf, FOTA_TXT_PATHSTR_UNKNOWN, cap); buf[cap - 1] = 0; return buf;
   }
   uint8_t hs  = (uint8_t)((c->out_path_len >> 6) + 1);
   uint8_t cnt = (uint8_t)(c->out_path_len & 63);
@@ -556,21 +559,23 @@ static const char* fota_client_path_str(const ClientInfo* c, char* buf, int cap)
 }
 
 //en: Find an ACL client by a pub_key hex prefix (2-12 hex chars, even count).
+//en: On failure points *err at a static reason from FotaTexts.h (no copying).
 //sk: Nájdi ACL klienta podľa hex prefixu pub_key (2-12 hex znakov, párny počet).
-static ClientInfo* fota_client_by_prefix(ClientACL& acl, const char* pfx, int pfx_len, char* err) {
+//sk: Pri chybe nasmeruje *err na statický dôvod z FotaTexts.h (bez kopírovania).
+static ClientInfo* fota_client_by_prefix(ClientACL& acl, const char* pfx, int pfx_len, const char** err) {
   uint8_t key[6];
-  if (pfx_len < 2 || pfx_len > 12 || (pfx_len & 1)) { strcpy(err, "prefix = 2-12 hex znakov"); return NULL; }
+  if (pfx_len < 2 || pfx_len > 12 || (pfx_len & 1)) { *err = FOTA_TXT_ERR_PREFIX_LEN; return NULL; }
   for (int i = 0; i < pfx_len; i++) {
     char c = pfx[i];
     int v = (c >= '0' && c <= '9') ? c - '0'
           : (c >= 'a' && c <= 'f') ? c - 'a' + 10
           : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
-    if (v < 0) { strcpy(err, "prefix nie je hex"); return NULL; }
+    if (v < 0) { *err = FOTA_TXT_ERR_PREFIX_NOT_HEX; return NULL; }
     if (i & 1) key[i / 2] |= (uint8_t)v;
     else       key[i / 2]  = (uint8_t)(v << 4);
   }
   ClientInfo* c = acl.getClient(key, pfx_len / 2);
-  if (!c) strcpy(err, "klient nenajdeny v ACL");
+  if (!c) *err = FOTA_TXT_ERR_CLIENT_NOT_FOUND;
   return c;
 }
 
@@ -580,7 +585,7 @@ bool RepeaterMesh::fotaHandleSerialPathCli(const char* fargs, char* reply) {
 
   if (strcmp(a, "getacl") == 0) {
     int n = acl.getNumClients();
-    FOTA_DEBUG_PRINTLN("[FOTA] ACL: %d klientov", n);
+    FOTA_DEBUG_PRINTLN("[FOTA] ACL: %d clients", n);
     for (int i = 0; i < n; i++) {
       ClientInfo* c = acl.getClientByIdx(i);
       char pb[96];
@@ -589,21 +594,21 @@ bool RepeaterMesh::fotaHandleSerialPathCli(const char* fargs, char* reply) {
                          i, k[0], k[1], k[2], k[3], k[4], k[5], (unsigned)c->permissions,
                          c->isAdmin() ? " admin" : "", fota_client_path_str(c, pb, sizeof(pb)));
     }
-    sprintf(reply, "FOTA getacl: %d klientov -> serial", n);
+    sprintf(reply, FOTA_TXT_GETACL_FMT, n);
     return true;
   }
 
   if (strncmp(a, "getpath", 7) == 0 && (a[7] == ' ' || a[7] == 0)) {
     const char* arg = a + 7;
     while (*arg == ' ') arg++;
-    if (*arg == 0) { strcpy(reply, "FOTA getpath <pubkey-prefix-hex>"); return true; }
+    if (*arg == 0) { strcpy(reply, FOTA_TXT_GETPATH_USAGE); return true; }
     int len = 0;
     while (arg[len] && arg[len] != ' ') len++;
-    char err[48];
-    ClientInfo* c = fota_client_by_prefix(acl, arg, len, err);
-    if (!c) { sprintf(reply, "FOTA getpath ERR: %s", err); return true; }
+    const char* err = "";
+    ClientInfo* c = fota_client_by_prefix(acl, arg, len, &err);
+    if (!c) { sprintf(reply, FOTA_TXT_GETPATH_ERR_FMT, err); return true; }
     char pb[96];
-    sprintf(reply, "FOTA path[%.*s] %s", len, arg, fota_client_path_str(c, pb, sizeof(pb)));
+    sprintf(reply, FOTA_TXT_PATH_OF_CLIENT_FMT, len, arg, fota_client_path_str(c, pb, sizeof(pb)));
     return true;
   }
 
@@ -615,24 +620,24 @@ bool RepeaterMesh::fotaHandleSerialPathCli(const char* fargs, char* reply) {
     const char* rest = arg + plen;
     while (*rest == ' ') rest++;
     if (*arg == 0 || *rest == 0) {
-      strcpy(reply, "FOTA setpath <pubkey-prefix-hex> <cesta nn,nn|nnnn,...|nnnnnn,...>");
+      strcpy(reply, FOTA_TXT_SETPATH_PFX_USAGE);
       return true;
     }
-    char err[48];
-    ClientInfo* c = fota_client_by_prefix(acl, arg, plen, err);
-    if (!c) { sprintf(reply, "FOTA setpath ERR: %s", err); return true; }
+    const char* err = "";
+    ClientInfo* c = fota_client_by_prefix(acl, arg, plen, &err);
+    if (!c) { sprintf(reply, FOTA_TXT_SETPATH_ERR_FMT, err); return true; }
     uint8_t path[MAX_PATH_SIZE]; uint8_t enc;
-    if (!fota_parse_path_arg(rest, path, &enc, err)) {
-      sprintf(reply, "FOTA setpath ERR: %s", err);
+    if (!fota_parse_path_arg(rest, path, &enc, &err)) {
+      sprintf(reply, FOTA_TXT_SETPATH_ERR_FMT, err);
       return true;
     }
     uint8_t hs = (uint8_t)((enc >> 6) + 1), cnt = (uint8_t)(enc & 63);
     memcpy(c->out_path, path, (size_t)cnt * hs);
     c->out_path_len = enc;
-    FOTA_DEBUG_PRINTLN("[FOTA] setpath[%.*s]: %u hopov (hs=%u) ulozene do ACL",
+    FOTA_DEBUG_PRINTLN("[FOTA] setpath[%.*s]: %u hops (hs=%u) stored into ACL",
                        plen, arg, (unsigned)cnt, (unsigned)hs);
-    sprintf(reply, "FOTA setpath[%.*s] OK: %u %s (%uB)",
-            plen, arg, (unsigned)cnt, cnt == 1 ? "hop" : "hopy", (unsigned)hs);
+    sprintf(reply, FOTA_TXT_SETPATH_PFX_OK_FMT,
+            plen, arg, (unsigned)cnt, cnt == 1 ? FOTA_TXT_HOP_SG : FOTA_TXT_HOP_PL, (unsigned)hs);
     return true;
   }
 
@@ -652,12 +657,12 @@ void RepeaterMesh::runFotaCli(const char* fargs, char* reply) {
     //sk: Diagnostika rádia (READ-ONLY). ZephCore radio adapter tu nemá surový
     //sk: prístup k SX1262 registrom — hlásime noise floor + RX počítadlá
     //sk: (Arduino build číta RxGain register 0x08AC).
-    FOTA_DEBUG_PRINTLN("[FOTA] AGC nf=%d rxpkts=%lu rxerr=%lu agc_reset=%lus(0=vyp)",
+    FOTA_DEBUG_PRINTLN("[FOTA] AGC nf=%d rxpkts=%lu rxerr=%lu agc_reset=%lus(0=off)",
                        (int)_radio->getNoiseFloor(),
                        (unsigned long)_radio->getPacketsRecv(),
                        (unsigned long)_radio->getPacketsRecvErrors(),
                        (unsigned long)(((uint32_t)_prefs.agc_reset_interval) * 4));
-    sprintf(reply, "AGC (zephyr) nf=%d rxpkts=%lu rxerr=%lu agc_reset=%lus",
+    sprintf(reply, FOTA_TXT_AGC_ZEPHYR_FMT,
             (int)_radio->getNoiseFloor(),
             (unsigned long)_radio->getPacketsRecv(),
             (unsigned long)_radio->getPacketsRecvErrors(),
@@ -814,9 +819,9 @@ void RepeaterMesh::fotaLoop() {
     if (_mgr->getOutboundTotal() == 0 || millisHasNowPassed(_fota_apply_deadline)) {
       fota_clear_apply_pending();
       _fota_apply_deadline = 0;
-      FOTA_DEBUG_PRINTLN("[FOTA] ACK odoslaný — spúšťam flash");
+      FOTA_DEBUG_PRINTLN("[FOTA] ACK sent — starting flash");
       fota_apply();   //en: does NOT return on success (jump to flasher + reboot)
-      FOTA_DEBUG_PRINTLN("[FOTA] flash zlyhal pred skokom (pozri vyššie)");
+      FOTA_DEBUG_PRINTLN("[FOTA] flash failed before the jump (see above)");
     }
   }
 

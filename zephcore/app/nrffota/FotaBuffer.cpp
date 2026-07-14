@@ -24,7 +24,7 @@ uint8_t* fota_get_buffer(uint32_t need) {
         return nullptr;
     }
     if (s_fota_buf_in_use) {
-        FOTA_DEBUG_PRINTLN("[FOTA] buffer: už požičaný (reentrancia?)");
+        FOTA_DEBUG_PRINTLN("[FOTA] buffer: already borrowed (reentrancy?)");
         return nullptr;
     }
     s_fota_buf_in_use = true;
@@ -35,7 +35,7 @@ uint8_t* fota_get_buffer(uint32_t need) {
 
 void fota_put_buffer(uint8_t* p) {
     if (p != s_fota_buf) {
-        FOTA_DEBUG_PRINTLN("[FOTA] buffer: put cudzí smerník — ignorujem");
+        FOTA_DEBUG_PRINTLN("[FOTA] buffer: put of a foreign pointer — ignoring");
         return;
     }
     s_fota_buf_in_use = false;

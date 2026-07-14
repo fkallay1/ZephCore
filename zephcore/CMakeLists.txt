@@ -610,6 +610,7 @@ if(CONFIG_ZEPHCORE_ROLE_REPEATER)
       WITH_LORA_FOTA=1
       FOTA_ZEPHCORE_BUILD=1
       FOTA_CHANNEL_NAME="${CONFIG_ZEPHCORE_FOTA_CHANNEL_NAME}"
+      FOTA_LANG_SK=1   # Slovak CLI reply texts (FotaTexts.h); drop the define for English
     )
     if(CONFIG_ZEPHCORE_FOTA_DEBUG)
       target_compile_definitions(app PRIVATE FOTA_DEBUG=1)

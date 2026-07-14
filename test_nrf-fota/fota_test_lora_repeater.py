@@ -388,7 +388,8 @@ def evaluate(lines, new_build, expected_fnv):
     print(green("\n══════ VÝSLEDOK ══════"))
     dev_fnv = None
     for l in lines:
-        m = re.search(r"FNV-1a výstupu.*?0x([0-9A-Fa-f]+)", l)
+        # FW od buildu s FotaTexts.h tlačí "FNV-1a of output"; staršie buildy "FNV-1a výstupu"
+        m = re.search(r"FNV-1a (?:of output|výstupu).*?0x([0-9A-Fa-f]+)", l)
         if m: dev_fnv = int(m.group(1), 16)
     print(f"   FNV-1a očakávaný (NEW): 0x{expected_fnv:08X}")
     if dev_fnv is not None:

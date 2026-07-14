@@ -48,6 +48,7 @@ SHARED = [
     (f"{MC_FOTA}/FotaCrypto.h",     f"{ZC_FOTA}/FotaCrypto.h"),
     (f"{MC_FOTA}/FotaFs.h",         f"{ZC_FOTA}/FotaFs.h"),
     (f"{MC_FOTA}/FotaDebug.h",      f"{ZC_FOTA}/FotaDebug.h"),
+    (f"{MC_FOTA}/FotaTexts.h",      f"{ZC_FOTA}/FotaTexts.h"),
     (f"{MC_FOTA}/flash_layout.h",   f"{ZC_FOTA}/flash_layout.h"),
     (f"{MC_FOTA}/FwId.h",           f"{ZC_FOTA}/FwId.h"),
     (f"{MC_FOTA}/FwId.cpp",         f"{ZC_FOTA}/FwId.cpp"),
