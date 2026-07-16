@@ -45,7 +45,8 @@
 //sk: CRC16 pokrýva všetko okrem seba — ak CRC nesedí, zápis bol prerušený
 //sk: a session sa zahodí.
 // =====================================================================
-#define FOTA_META_MAGIC  0x4F544101u   //en: "OTA\x01"
+#define FOTA_META_MAGIC  0x4F544102u   //en: "OTA\x02" — v2: + hdr_signer_prefix (old meta.bin is discarded after FW update)
+                                       //sk: "OTA\x02" — v2: + hdr_signer_prefix (starý meta.bin sa po update FW zahodí)
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;             //en: FOTA_META_MAGIC
@@ -64,6 +65,8 @@ typedef struct __attribute__((packed)) {
     uint8_t  sig_recv;          //en: SIG received
     uint8_t  hdr_key_id;        //en: key_id from SIG
     uint8_t  hdr_sig[64];       //en: Ed25519 signature from SIG (verify after META+SIG received)
+    uint8_t  hdr_signer_prefix[4]; //en: v0-prefix: first 4 B of signer pubkey (key_id==0)
+                                   //sk: v0-prefix: prvé 4 B pubkey podpisovateľa (key_id==0)
     uint16_t crc16;             //en: CRC16 of everything above
 } FotaMetaPersist;
 
@@ -95,6 +98,8 @@ typedef struct {
     uint8_t  sig_recv;                 //en: SIG received
     uint8_t  hdr_key_id;               //en: key_id from SIG
     uint8_t  hdr_sig[64];              //en: Ed25519 signature from SIG (verify after META+SIG received)
+    uint8_t  hdr_signer_prefix[4];     //en: v0-prefix: first 4 B of signer pubkey (key_id==0)
+                                       //sk: v0-prefix: prvé 4 B pubkey podpisovateľa (key_id==0)
 
     //en: bitmap: bit N = 1 → chunk N received and written (128 B covers 1024 chunks)
     //sk: bitová mapa: bit N = 1 → chunk N prijatý a zapísaný (128 B pokryje 1024 chunkov)
@@ -123,12 +128,16 @@ typedef struct {
 #endif
 
 // =====================================================================
-//en: Authorization table for Ed25519 verification (defined in FotaReceiver_signkey.cpp)
+//en: Authorization table for Ed25519 verification (defined in FotaReceiver_signkey.cpp).
+//en: Keys are addressed by pubkey prefix (v0-prefix format); legacy key_id N maps
+//en: to s_authors[N-1] (test key = index 0 = legacy key_id 1).
+//sk: Autorizačná tabuľka pre Ed25519 verify (definovaná vo FotaReceiver_signkey.cpp).
+//sk: Kľúče sa adresujú prefixom pubkey (v0-prefix formát); legacy key_id N mapuje
+//sk: na s_authors[N-1] (test kľúč = index 0 = legacy key_id 1).
 // =====================================================================
 #define FOTA_MAX_AUTHORS  8
 
 typedef struct {
-    uint8_t  id;           //en: key_id
     uint8_t  pub_key[32];  //en: Ed25519 public key
 } FotaAuthorEntry;
 

@@ -80,6 +80,9 @@
 //sk: ZephCore variant (bez prístupu k SX1262 registrom) — FotaRepeaterMesh.cpp runFotaCli().
 #define FOTA_TXT_AGC_FMT              "AGC gain=0x%02X(%s) boost=%s rssi=%ddBm nf=%d agc_reset=%lus"
 #define FOTA_TXT_AGC_ZEPHYR_FMT       "AGC (zephyr) nf=%d rxpkts=%lu rxerr=%lu agc_reset=%lus"
+//en: non-SX126x radio (e.g. LR1110 on T1000-E) — no RX_GAIN register access.
+//sk: iné rádio než SX126x (napr. LR1110 na T1000-E) — bez prístupu k RX_GAIN registru.
+#define FOTA_TXT_AGC_NOREG_FMT        "AGC gain-reg=n/a boost=%s nf=%d agc_reset=%lus"
 
 //en: 'fota getpath' (LoRa, this client) — FotaMyMesh.cpp: fotaHandleLoRaCli().
 //sk: 'fota getpath' (LoRa, tento klient) — FotaMyMesh.cpp: fotaHandleLoRaCli().

@@ -67,7 +67,9 @@ DEFAULT_FK_LORA     = Path(os.environ.get("PLATFORMIO_SETTING_PROJECTS_DIR")
 # runtime z fota_sender.fota_channel_secret(), žiadna lokálna konštanta netreba.
 # FOTA env (ProMicro_repeater_fota) NEMÁ -D FOTA_ALLOW_UNSIGNED → HEADER MUSÍ byť
 # podpísaný Ed25519, inak repeater odmietne session (FOTA_ERR_SIGNATURE 0x06).
-# Default = test keypair (pubkey == s_authors[key_id=1] v FotaReceiver_signkey.cpp).
+# Default = test keypair (pubkey == s_authors index 0 v FotaReceiver_signkey.cpp).
+# Tento test drží --keyid 1 (legacy 99B SIG) ako regresiu starého formátu; nový
+# v0-prefix formát (key_id=0 + 4B prefix) sa overuje manuálne (viď fcl_readme runbook).
 DEFAULT_PRIVKEY     = SCRIPT_DIR / "test_key.der"
 
 # FOTA status flags (z FotaState.h)
@@ -448,7 +450,8 @@ def main():
                      help="Ed25519 private key (DER/PEM) na podpis OTA HEADER "
                           "(default: test_nrf-fota/test_key.der — OTA env vyžaduje podpísaný HEADER)")
     ap.add_argument("--keyid", type=int, default=1,
-                     help="Key ID pre podpis OTA HEADER (default: 1)")
+                     help="Key ID pre podpis OTA HEADER (default: 1 = legacy 99B; "
+                          "0 = v0-prefix nový formát)")
     ap.add_argument("--packetorder", choices=["normal", "hbegin", "hmiddle", "hend"],
                      default="hend",
                      help="Pozícia HEADER paketu pri broadcaste. DEFAULT 'hend' (chunky "

@@ -32,6 +32,13 @@ void fota_init();
 //sk: Vracia true ak bol paket rozpoznaný ako FOTA.
 bool fota_process(const uint8_t* plain, int plen);
 
+//en: v0-prefix ACL hook — the app layer (FotaMyMesh.cpp) returns pubkeys of ACL
+//en: admins whose first 4 B match `prefix`. Default (non-MeshCore builds): 0.
+//sk: v0-prefix ACL hook — aplikačná vrstva (FotaMyMesh.cpp) vráti pubkey ACL
+//sk: adminov, ktorých prvé 4 B sedia s `prefix`. Default (ne-MeshCore buildy): 0.
+#define FOTA_ACL_MAX_CANDIDATES 4
+int fota_acl_admin_pubkeys(const uint8_t prefix[4], const uint8_t* out_keys[], int max);
+
 //en: Manual trigger of the patch application (if FOTA_ST_VERIFIED).
 bool fota_apply();
 

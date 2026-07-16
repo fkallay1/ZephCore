@@ -93,21 +93,25 @@ def crc16(data: bytes) -> int:
 # ─────────────────────────────────────────────────────────────────────
 # Ed25519 podpisanie FOTA HEADER
 # ─────────────────────────────────────────────────────────────────────
+FOTA_KEY_ID_PREFIX = 0   # key_id=0 -> podpisovateľ identifikovaný 4B pubkey prefixom za podpisom
+
 def load_ed25519_privkey(key_path: Path):
-    """Načíta Ed25519 private key z DER/PEM súboru, vráti ECC key objekt."""
+    """Načíta Ed25519 private key z DER súboru, vráti ExpandedKey (jednotný signer)."""
+    from fota_ed25519_expanded import key_from_der
+    return key_from_der(key_path)
+
+def load_ed25519_privkey_hex(hexstr: str):
+    """64 B expandovaný kľúč (companion 'dlhý hex') -> ExpandedKey."""
+    from fota_ed25519_expanded import key_from_hex
+    from fota_texts import T
     try:
-        from Crypto.PublicKey import ECC
-    except ImportError:
-        sys.exit("[CHYBA] --privkey potrebuje pycryptodome:\n"
-                 "         <penv>/python.exe -m pip install pycryptodome")
-    raw = key_path.read_bytes()
-    return ECC.import_key(raw)
+        return key_from_hex(hexstr)
+    except ValueError as e:
+        sys.exit(T("sign_privkey_hex_err", msg=e))
 
 def sign_fota_header(otbmsg: bytes, privkey) -> bytes:
-    """Podpise message (107B: type→old_sha256) a vráti 64B signature."""
-    from Crypto.Signature import eddsa
-    sig_obj = eddsa.new(privkey, 'rfc8032')
-    return sig_obj.sign(otbmsg)
+    """Podpise message (102B META) a vráti 64B signature."""
+    return privkey.sign(otbmsg)
 
 # ─────────────────────────────────────────────────────────────────────
 # Kryptografia (MeshCore GRP_DATA)
@@ -174,11 +178,21 @@ def build_meta_payload(total_chunks: int, patch_size: int,
     return msg
 
 def build_sig_payload(meta: bytes, privkey, key_id: int) -> bytes:
-    """SIG (99B) = type+fota_prot_inf+old_sha256+key_id+signature. Podpis nad 102B META."""
+    """SIG = type+fota_prot_inf+old_sha256+key_id+signature[+signer_prefix].
+    key_id=0 (nový formát): +4B prefix pubkey podpisovateľa -> 103 B; receiver
+    hľadá prefix v s_authors a potom v ACL adminoch. key_id>=1 (legacy, 99 B):
+    staré FW, s_authors[key_id-1]. Podpis vždy nad 102B META."""
     sig = sign_fota_header(meta, privkey) if privkey else bytes(64)
     old_sha256 = meta[70:102]
     out = bytes([FOTA_PKT_HDR_SIG, FOTA_PROT_INF_V0]) + old_sha256 + bytes([key_id]) + sig
-    assert len(out) == 99, f"SIG musi byt 99B, je {len(out)}"
+    if key_id == FOTA_KEY_ID_PREFIX:
+        if privkey is None:
+            from fota_texts import T
+            sys.exit(T("sign_keyid0_needs_priv"))
+        out += privkey.pub[:4]
+        assert len(out) == 103, f"SIG(v0-prefix) musi byt 103B, je {len(out)}"
+    else:
+        assert len(out) == 99, f"SIG musi byt 99B, je {len(out)}"
     return out
 
 def grpdata_plaintext(fota_payload: bytes, ts: int) -> bytes:
@@ -623,9 +637,10 @@ def main():
                                 help='Pravdepodobnosť [0..1] zahodenia chunku (simulácia LoRa straty, test kumulácie).')
     ap.add_argument('--cycle-delay', type=float, default=2.0,
                                 help='Pauza medzi cyklami [s].')
-    ap.add_argument('--privkey', help='Ed25519 private key (DER/PEM) na podpis HEADER')
-    ap.add_argument('--keyid',    type=int, default=1,
-                                help='Key ID ktory sa pouzije v HEADER (predvolene 1)')
+    from fota_texts import T
+    ap.add_argument('--privkey', help=T('help_privkey'))
+    ap.add_argument('--privkey-hex', help=T('help_privkey_hex'))
+    ap.add_argument('--keyid',    type=int, default=0, help=T('help_keyid'))
     ap.add_argument('--packetorder', choices=['normal', 'hbegin', 'hmiddle', 'hend'],
                                 default='normal',
                                 help='Pozícia HEADER paketu (out-of-order test): '
@@ -710,11 +725,18 @@ def main():
 
     print(f'[init] {total} chunkov x {FOTA_CHUNK_DATA}B = {len(patch)}B patch')
 
-    # Nacitaj Ed25519 private key
+    # Nacitaj Ed25519 private key (hex > der > None s fallbackom na legacy unsigned)
     privkey = None
-    if args.privkey:
-        print(f'[init] Ed25519 private key: {args.privkey} (key_id=0x{args.keyid:02X})')
+    if args.privkey_hex:
+        privkey = load_ed25519_privkey_hex(args.privkey_hex)
+        print(f'[init] Ed25519 privkey-hex (pub prefix {privkey.prefix.hex().upper()}, key_id=0x{args.keyid:02X})')
+    elif args.privkey:
         privkey = load_ed25519_privkey(Path(args.privkey))
+        print(f'[init] Ed25519 private key: {args.privkey} (pub prefix {privkey.prefix.hex().upper()}, key_id=0x{args.keyid:02X})')
+    elif args.keyid == FOTA_KEY_ID_PREFIX:
+        args.keyid = 1   # unsigned nejde s prefix formátom -> legacy zero-sig
+        from fota_texts import T
+        print(T("sign_no_privkey_legacy"))
 
     # Otvor serial
     print(f'[serial] {args.port} @ {args.baud}')

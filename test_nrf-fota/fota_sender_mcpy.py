@@ -70,7 +70,15 @@ async def run_mcpy(args):
     chunks = [patch[i:i+FOTA_CHUNK_DATA] for i in range(0, len(patch), FOTA_CHUNK_DATA)]
     total = len(chunks)
     old_prefix = old_sha256[:4]
-    privkey = load_ed25519_privkey(Path(args.privkey)) if args.privkey else None
+    if args.privkey_hex:
+        from fota_sender import load_ed25519_privkey_hex
+        privkey = load_ed25519_privkey_hex(args.privkey_hex)
+    elif args.privkey:
+        privkey = load_ed25519_privkey(Path(args.privkey))
+    else:
+        privkey = None
+        if args.keyid == 0:
+            args.keyid = 1   # unsigned nejde s prefix formátom -> legacy zero-sig
     meta = build_meta_payload(total, len(patch), patch_sha256, new_sha256, old_sha256)
     sig  = build_sig_payload(meta, privkey, args.keyid)
     path_len, path = scope_to_path(args.scope, bytes.fromhex(args.path) if args.path else b"")
@@ -130,7 +138,8 @@ def main():
     ap.add_argument('--packetorder', choices=['normal', 'hbegin', 'hend'], default='hend')
     ap.add_argument('--reboot', action='store_true')
     ap.add_argument('--privkey')
-    ap.add_argument('--keyid', type=int, default=1)
+    ap.add_argument('--privkey-hex')
+    ap.add_argument('--keyid', type=int, default=0)
     # POZOR na defaulty rádia: 869.618/62.5/SF8 = náš FK pracovný kanál. FOTA FW envy
     # (ProMicro/SenseCap *_fota) a e2e test ale stavajú CZ test preset 869.525/62.5/SF7
     # — pri ručnom použití zadaj --freq/--sf explicitne podľa repeatera, inak sa minú.

@@ -38,6 +38,17 @@
 #define FOTA_MAGIC         0x07A0 //en: GRP_DATA data_type for FOTA (gating discriminator)
 #define FOTA_PROT_INF_V0   0x00   //en: version of the FOTA protocol/structs
 
+//en: key_id=0 in SIG = "v0-prefix" format: signer is identified by the first
+//en: 4 B of their Ed25519 pubkey APPENDED after signature[] (SIG = 99+4 = 103 B).
+//en: The receiver looks the prefix up in s_authors, then in the ACL admins.
+//en: key_id>=1 = legacy 99 B format (s_authors[key_id-1]) for old FW.
+//sk: key_id=0 v SIG = "v0-prefix" formát: podpisovateľa identifikujú prvé
+//sk: 4 B jeho Ed25519 pubkey PRIPOJENÉ za signature[] (SIG = 99+4 = 103 B).
+//sk: Receiver hľadá prefix v s_authors, potom v ACL adminoch.
+//sk: key_id>=1 = legacy 99 B formát (s_authors[key_id-1]) pre staré FW.
+#define FOTA_KEY_ID_PREFIX   0x00
+#define FOTA_SIG_PREFIX_LEN  4
+
 //en: Max data in one FOTA_CHUNK. Via standard GRP_DATA (sendGroupData),
 //en: data_len ≤ MAX_GROUP_DATA_LENGTH(165); data = [ts 4B] + chunk(13 + DATA),
 //en: so DATA ≤ 148. We pick 144 with margin (matches fota_sender.py FOTA_CHUNK_DATA).
@@ -75,6 +86,10 @@ typedef struct __attribute__((packed)) {
 //en: (a wrong key_id → verify fails).
 //sk: FOTA_PKT_HDR_SIG — SIG, 99 B (2. časť HEADER). data_len = 4 + 99 = 103 ≤ 165.
 //sk: Podpis kryje LEN 102 B META; key_id mimo podpisu (zlý key_id → verify zlyhá).
+//en: With key_id==FOTA_KEY_ID_PREFIX a 4 B signer_prefix follows the struct
+//en: (SIG = 103 B, data_len = 4 + 103 = 107 ≤ 165).
+//sk: Pri key_id==FOTA_KEY_ID_PREFIX za štruktúrou nasleduje 4 B signer_prefix
+//sk: (SIG = 103 B, data_len = 4 + 103 = 107 ≤ 165).
 typedef struct __attribute__((packed)) {
     uint8_t  type;             //en: FOTA_PKT_HDR_SIG
     uint8_t  fota_prot_inf;     //en: FOTA_PROT_INF_V0 (same as META; META is authoritative)

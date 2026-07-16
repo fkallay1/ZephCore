@@ -137,12 +137,16 @@ def latest_two(device: str) -> tuple[Path, Path]:
 
 def gen_pair(old_bin: Path, new_bin: Path, out_dir: Path, args):
     privkey = args.privkey
-    if privkey is None:
+    if privkey is None and not args.privkey_hex:
         cand = HERE / "test_key.der"
         privkey = str(cand) if cand.exists() else None
+    keyid = args.keyid
+    if not privkey and not args.privkey_hex and keyid == 0:
+        keyid = 1   # unsigned nejde s v0-prefix formátom -> legacy zero-sig
     common = dict(channel_name=args.channel_name, channel_idx=args.channel_idx,
                   freq=args.freq, bw=args.bw, sf=args.sf, cr=args.cr,
-                  scope=args.scope, path=args.path, privkey=privkey, keyid=args.keyid)
+                  scope=args.scope, path=args.path, privkey=privkey,
+                  privkey_hex=args.privkey_hex, keyid=keyid)
 
     old_n, new_n = bin_build_num(old_bin), bin_build_num(new_bin)
     dev = args.device
@@ -156,7 +160,9 @@ def gen_pair(old_bin: Path, new_bin: Path, out_dir: Path, args):
     rev = X.build_pkg(new_bin, old_bin, out_dir / "fota_patch_rev.bin", **common)
     (out_dir / rev_name).write_text(json.dumps(rev, indent=2))
 
-    sgn = "signed" if privkey else "UNSIGNED"
+    sgn = "signed" if (privkey or args.privkey_hex) else "UNSIGNED"
+    fmt = "v0-prefix (staré FW potrebujú --keyid 1)" if keyid == 0 else f"legacy key_id={keyid}"
+    print(f"[fotapkg] podpis: {sgn}, formát: {fmt}")
     print(f"[fotapkg] {fwd_name}  ({old_bin.name} → {new_bin.name})  "
           f"patch={fwd['fw']['patch_len']}B old={fwd['fw']['old_sha256'][:8]} "
           f"new={fwd['fw']['new_sha256'][:8]} [{sgn}]")
@@ -180,8 +186,10 @@ def main():
     ap.add_argument('--path', default='')
     ap.add_argument('--freq', type=float, default=869.618); ap.add_argument('--bw', type=float, default=62.5)
     ap.add_argument('--sf', type=int, default=8); ap.add_argument('--cr', type=int, default=5)
-    ap.add_argument('--privkey', help="Ed25519 priv (default test_key.der ak je); '' = nepodpisuj")
-    ap.add_argument('--keyid', type=int, default=1)
+    from fota_texts import T
+    ap.add_argument('--privkey', help="Ed25519 priv (default test_key.der if present); '' = do not sign")
+    ap.add_argument('--privkey-hex', help=T('help_privkey_hex'))
+    ap.add_argument('--keyid', type=int, default=0, help=T('help_keyid'))
     args = ap.parse_args()
     if args.privkey == '':
         args.privkey = None

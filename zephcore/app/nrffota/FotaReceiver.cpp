@@ -33,13 +33,46 @@ CustomLFS FotaFS(FOTA_FS_FLASH_ADDR, FOTA_FS_FLASH_SIZE, FOTA_FS_BLOCK_SIZE);
 FotaFsClass FotaFS;
 #endif
 
+#if !defined(FOTA_MESHCORE_BUILD)
+//en: Default — no ACL on this platform (ZephCore): only s_authors verify.
+//sk: Default — platforma bez ACL (ZephCore): overuje sa len s_authors.
+int fota_acl_admin_pubkeys(const uint8_t prefix[4], const uint8_t* out_keys[], int max) {
+    (void)prefix; (void)out_keys; (void)max;
+    return 0;
+}
+#endif
+
 static bool verify_header_signature(const uint8_t* sig,
                                     const uint8_t* msg, size_t msg_len,
-                                    uint8_t key_id) {
-    for (int i = 0; i < s_author_count; i++) {
-        if (s_authors[i].id == key_id) {
-            return fota_ed25519_verify(sig, s_authors[i].pub_key, msg, msg_len);
+                                    uint8_t key_id, const uint8_t* signer_prefix) {
+    if (key_id == FOTA_KEY_ID_PREFIX) {
+        //en: v0-prefix — signer by 4 B pubkey prefix: s_authors first, then ACL admins
+        //sk: v0-prefix — podpisovateľ podľa 4 B prefixu pubkey: najprv s_authors, potom ACL admini
+        for (int i = 0; i < s_author_count; i++) {
+            if (memcmp(s_authors[i].pub_key, signer_prefix, FOTA_SIG_PREFIX_LEN) == 0 &&
+                fota_ed25519_verify(sig, s_authors[i].pub_key, msg, msg_len)) {
+                FOTA_DEBUG_PRINTLN("[FOTA] HEADER signer=builtin[%d]", i);
+                return true;
+            }
         }
+        const uint8_t* acl_keys[FOTA_ACL_MAX_CANDIDATES];
+        int n = fota_acl_admin_pubkeys(signer_prefix, acl_keys, FOTA_ACL_MAX_CANDIDATES);
+        for (int i = 0; i < n; i++) {
+            if (fota_ed25519_verify(sig, acl_keys[i], msg, msg_len)) {
+                FOTA_DEBUG_PRINTLN("[FOTA] HEADER signer=ACL admin");
+                return true;
+            }
+        }
+        FOTA_DEBUG_PRINTLN("[FOTA] signer prefix %02X%02X%02X%02X not found/valid (authors+ACL)",
+            (unsigned)signer_prefix[0], (unsigned)signer_prefix[1],
+            (unsigned)signer_prefix[2], (unsigned)signer_prefix[3]);
+        return false;
+    }
+    //en: legacy: key_id N -> s_authors[N-1] (test key = index 0)
+    //sk: legacy: key_id N -> s_authors[N-1] (test kľúč = index 0)
+    int idx = (int)key_id - 1;
+    if (idx >= 0 && idx < s_author_count) {
+        return fota_ed25519_verify(sig, s_authors[idx].pub_key, msg, msg_len);
     }
     FOTA_DEBUG_PRINTLN("[FOTA] UNKNOWN key_id=0x%X", (unsigned)key_id);
     return false;
@@ -325,6 +358,7 @@ static bool save_meta() {
     mp.sig_recv     = fota.sig_recv;
     mp.hdr_key_id   = fota.hdr_key_id;
     memcpy(mp.hdr_sig, fota.hdr_sig, 64);
+    memcpy(mp.hdr_signer_prefix, fota.hdr_signer_prefix, FOTA_SIG_PREFIX_LEN);
     mp.crc16 = fota_crc16((const uint8_t*)&mp, (uint16_t)(sizeof(mp) - 2u));
 
     FotaFS.remove(FOTA_FS_META);
@@ -595,6 +629,7 @@ static void try_resume() {
     fota.sig_recv     = mp.sig_recv;
     fota.hdr_key_id   = mp.hdr_key_id;
     memcpy(fota.hdr_sig, mp.hdr_sig, 64);
+    memcpy(fota.hdr_signer_prefix, mp.hdr_signer_prefix, FOTA_SIG_PREFIX_LEN);
     fota.status   = mp.status;
     fota.err_code = mp.err_code;
 
@@ -900,7 +935,8 @@ static void try_verify_header() {
     if (is_unsigned) { FOTA_DEBUG_PRINTLN("[FOTA] HEADER: UNSIGNED (FOTA_ALLOW_UNSIGNED)"); ok = true; }
     else
 #endif
-    ok = verify_header_signature(fota.hdr_sig, meta, 102u, fota.hdr_key_id);
+    ok = verify_header_signature(fota.hdr_sig, meta, 102u, fota.hdr_key_id,
+                                 fota.hdr_signer_prefix);
 
     if (!ok) {
         FOTA_DEBUG_PRINTLN("[FOTA] HEADER: INVALID signature — rejecting");
@@ -1010,14 +1046,29 @@ static void handle_sig(const uint8_t* plain, int plen) {
         //sk: SIG-first založil session pre cudzí patch. (SIG.old_sha256 = "gating patrí mne".)
         FOTA_DEBUG_PRINTLN("[FOTA] SIG: base FW mismatch — patch is not for this device, drop"); return;
     }
+    //en: v0-prefix: with key_id==0 a 4 B signer prefix must follow the struct.
+    //en: Check BEFORE opening a session so a malformed packet cannot start one.
+    //sk: v0-prefix: pri key_id==0 musí za štruktúrou nasledovať 4 B prefix podpisovateľa.
+    //sk: Kontrola PRED založením session, nech chybný paket žiadnu nezaloží.
+    const uint8_t* prefix = NULL;
+    if (pkt->key_id == FOTA_KEY_ID_PREFIX) {
+        if (plen < (int)sizeof(FotaHdrSigPkt) + FOTA_SIG_PREFIX_LEN) {
+            FOTA_DEBUG_PRINTLN("[FOTA] SIG: key_id=0 without signer prefix — drop"); return;
+        }
+        prefix = plain + sizeof(FotaHdrSigPkt);
+    }
+
     if (!(fota.status & FOTA_ST_RECEIVING)) { fota.status = FOTA_ST_RECEIVING; fota.total_chunks = 0; }
 
     //en: Re-send of an identical SIG? DUP → skip save_meta() (same reason as META).
     //sk: Re-send identického SIG? DUP → preskoč save_meta() (rovnaký dôvod ako META).
     bool dup_sig = fota.sig_recv && fota.hdr_key_id == pkt->key_id
-                && memcmp(fota.hdr_sig, pkt->signature, 64) == 0;
+                && memcmp(fota.hdr_sig, pkt->signature, 64) == 0
+                && (prefix == NULL || memcmp(fota.hdr_signer_prefix, prefix, FOTA_SIG_PREFIX_LEN) == 0);
     fota.hdr_key_id = pkt->key_id;
     memcpy(fota.hdr_sig, pkt->signature, 64);
+    if (prefix) memcpy(fota.hdr_signer_prefix, prefix, FOTA_SIG_PREFIX_LEN);
+    else        memset(fota.hdr_signer_prefix, 0, FOTA_SIG_PREFIX_LEN);
     fota.sig_recv = 1;
     if (!dup_sig) save_meta();   //en: DUP re-send → no flash write (do not stall RX)
     FOTA_DEBUG_PRINTLN("[FOTA] SIG received key_id=0x%X  %s", (unsigned)pkt->key_id,
