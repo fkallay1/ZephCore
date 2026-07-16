@@ -33,9 +33,13 @@ CustomLFS FotaFS(FOTA_FS_FLASH_ADDR, FOTA_FS_FLASH_SIZE, FOTA_FS_BLOCK_SIZE);
 FotaFsClass FotaFS;
 #endif
 
-#if !defined(FOTA_MESHCORE_BUILD)
-//en: Default — no ACL on this platform (ZephCore): only s_authors verify.
-//sk: Default — platforma bez ACL (ZephCore): overuje sa len s_authors.
+#if !defined(FOTA_MESHCORE_BUILD) && !defined(FOTA_ZEPHCORE_BUILD)
+//en: Default — platform without ACL glue: only s_authors verify. Both current
+//en: platforms provide the strong version in their glue (MeshCore:
+//en: FotaMyMesh.cpp, ZephCore: FotaRepeaterMesh.cpp — instance via s_fota_self).
+//sk: Default — platforma bez ACL glue: overuje sa len s_authors. Obe súčasné
+//sk: platformy dodávajú silnú verziu vo svojom glue (MeshCore: FotaMyMesh.cpp,
+//sk: ZephCore: FotaRepeaterMesh.cpp — inštancia cez s_fota_self).
 int fota_acl_admin_pubkeys(const uint8_t prefix[4], const uint8_t* out_keys[], int max) {
     (void)prefix; (void)out_keys; (void)max;
     return 0;

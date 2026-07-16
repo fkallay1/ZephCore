@@ -305,11 +305,20 @@ void RepeaterMesh::onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mes
 // =====================================================================
 //en: Initialization (hooks from RepeaterMesh::begin)
 // =====================================================================
+//en: Instance for the free-function FotaReceiver hooks (fota_acl_admin_pubkeys) —
+//en: repeater_mesh is file-static in src/main_repeater.cpp, no extern access
+//en: (MeshCore uses `extern MyMesh the_mesh` instead). Set in fotaEarlyInit().
+//sk: Inštancia pre free-function hooky FotaReceiveru (fota_acl_admin_pubkeys) —
+//sk: repeater_mesh je file-static v src/main_repeater.cpp, extern prístup nie je
+//sk: (MeshCore má namiesto toho `extern MyMesh the_mesh`). Nastavuje fotaEarlyInit().
+static RepeaterMesh* s_fota_self = nullptr;
+
 //en: At the START of RepeaterMesh::begin(): read the flasher debug marker as early
 //en: after boot as possible (GPREGRET2/RESETREAS) + reset the FOTA state.
 //sk: Na ZAČIATKU RepeaterMesh::begin(): prečítaj flasher debug marker čo najskôr
 //sk: po boote (GPREGRET2/RESETREAS) + vynuluj FOTA stav.
 void RepeaterMesh::fotaEarlyInit() {
+  s_fota_self = this;
   fota_check_flasher_debug();
   _fota_ready = false;
   _fota_pending_len = 0;
@@ -843,6 +852,33 @@ void RepeaterMesh::fotaLoop() {
                        (int)_radio->getNoiseFloor());
   }
 #endif // FOTA_DEBUG
+}
+
+//en: v0-prefix FOTA signature — candidates from the ACL: admin role only
+//en: (PERM_ACL_ADMIN; Read/Write and below do NOT qualify), matched by the
+//en: first 4 B of their identity pubkey. Called from try_verify_header()
+//en: in loop() context (deferred), so the Ed25519 verify cost stays off the RX path.
+//sk: v0-prefix FOTA podpis — kandidáti z ACL: len admin rola (PERM_ACL_ADMIN;
+//sk: Read/Write a nižšie sa NEkvalifikujú), zhoda prvých 4 B identity pubkey.
+//sk: Volané z try_verify_header() v loop() kontexte (deferovane), takže cena
+//sk: Ed25519 verify neblokuje RX cestu.
+int RepeaterMesh::fotaAclAdminPubkeys(const uint8_t prefix[4], const uint8_t* out_keys[], int max) {
+  int n = 0;
+  int cnt = acl.getNumClients();
+  for (int i = 0; i < cnt && n < max; i++) {
+    ClientInfo* c = acl.getClientByIdx(i);
+    if (!c->isAdmin()) continue;
+    if (memcmp(c->id.pub_key, prefix, FOTA_SIG_PREFIX_LEN) != 0) continue;
+    out_keys[n++] = c->id.pub_key;
+  }
+  return n;
+}
+
+//en: strong override of the FotaReceiver default (ZephCore build)
+//sk: silná verzia defaultu z FotaReceiver (ZephCore build)
+int fota_acl_admin_pubkeys(const uint8_t prefix[4], const uint8_t* out_keys[], int max) {
+  if (!s_fota_self) return 0;
+  return s_fota_self->fotaAclAdminPubkeys(prefix, out_keys, max);
 }
 
 #endif  // WITH_LORA_FOTA
