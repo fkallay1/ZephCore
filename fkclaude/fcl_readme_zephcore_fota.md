@@ -77,6 +77,7 @@ python test_nrf-fota/fota_sender.py --mode meshcore ...
 | Trailer | `fota_fwid` CMake target — hex+bin+UF2 po každom builde |
 | CLI | `fota status|verify|flash|clear|miss|missall|getpath|setpath|nack|decompress|dbg|id|agc` (alias `ota`) |
 | Debug výpisy | `CONFIG_ZEPHCORE_FOTA_DEBUG=y` (default v fota.conf) → `[FOTA] …` cez printk |
+| SIG overenie (v0-prefix) | `s_authors[]` builtin kľúče **+ ACL admini** (`PERM_ACL_ADMIN`, zhoda 4 B prefixu pubkey) — `RepeaterMesh::fotaAclAdminPubkeys` vo `FotaRepeaterMesh.cpp` (port z MC 2026-07-16; inštancia cez `s_fota_self`, lebo `repeater_mesh` je file-static) |
 
 ## Sync workflow s MeshCore (dôležité!)
 
