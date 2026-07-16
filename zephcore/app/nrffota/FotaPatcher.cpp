@@ -635,11 +635,30 @@ bool fota_flash_via_flasher() {
 
 #endif  // FOTA_HAS_HPATCH
 
-// ── Flasher debug marker — NRF_POWER->GPREGRET2 ──────────────────────────
-#define NRF_POWER_GPREGRET2 (*(volatile uint32_t*)0x40000514u)
+// ── Flasher debug marker — RESETREAS + RAM breadcrumb (ZC) + flash trace ──
+//en: HISTORY/WARNING: this used to read+clear a "GPREGRET2" register at
+//en: 0x40000514 — but that address is NOT GPREGRET2 (the real one is
+//en: 0x40000520; 0x514 is RESERVED space in the POWER peripheral next to
+//en: POFCON). Writing it corrupted POWER-peripheral state: on T1000-E the
+//en: device froze completely on the next USBDETECTED event (USB plug-in
+//en: while running; boards without a battery never see that event, which is
+//en: why ProMicro looked fine). The MeshCore flasher no longer writes any
+//en: register marker anyway (fmark is a no-op; the flash trace log carries
+//en: the step history), so the register access was removed entirely.
+//en: Do NOT reintroduce direct POWER register pokes here.
+//sk: HISTÓRIA/POZOR: tu sa kedysi čítal+mazal „GPREGRET2" register na
+//sk: 0x40000514 — tá adresa ale NIE JE GPREGRET2 (skutočný je 0x40000520;
+//sk: 0x514 je REZERVOVANÝ priestor POWER periférie vedľa POFCON). Zápis
+//sk: rozbil stav POWER periférie: na T1000-E zariadenie úplne zamrzlo pri
+//sk: najbližšom USBDETECTED evente (pripojenie USB za behu; boardy bez
+//sk: batérie ten event nikdy nezažijú, preto ProMicro vyzeral v poriadku).
+//sk: MeshCore flasher už žiadny register marker nezapisuje (fmark je no-op;
+//sk: históriu krokov nesie flash trace log), takže register prístup bol
+//sk: odstránený úplne. NEvracať sem priame zápisy do POWER registrov.
 #define NRF_POWER_RESETREAS (*(volatile uint32_t*)0x40000400u)
 static uint8_t  s_flasher_step  = 0;
-static uint32_t s_gpret2_raw    = 0;
+static uint32_t s_gpret2_raw    = 0;   //en: kept for the FLASHER-DBG print format (always 0 now)
+                                       //sk: ponechané kvôli formátu FLASHER-DBG výpisu (už vždy 0)
 static uint32_t s_resetreas_raw = 0;
 
 void fota_check_flasher_debug() {
@@ -656,11 +675,10 @@ void fota_check_flasher_debug() {
         }
     }
 #endif
-    s_gpret2_raw = NRF_POWER_GPREGRET2 & 0xFFu;
-    if (s_gpret2_raw != 0u) {
-        NRF_POWER_GPREGRET2 = 0u;          //en: clear it (SD not running yet → direct write OK)
-        s_flasher_step = (uint8_t)s_gpret2_raw;
-    }
+    //en: RESETREAS: read + W1C clear (correct address, standard practice — upstream
+    //en: initPowerMgr does the same; SD is never enabled this early in begin()).
+    //sk: RESETREAS: čítanie + W1C zmazanie (správna adresa, štandardný postup —
+    //sk: upstream initPowerMgr robí to isté; SD takto skoro v begin() nikdy nebeží).
     s_resetreas_raw = NRF_POWER_RESETREAS;
     NRF_POWER_RESETREAS = s_resetreas_raw; //en: write-1-to-clear
 }
@@ -719,8 +737,25 @@ static void fota_print_flasher_trace() {
         if (code == 0xD1u) { FOTA_DEBUG_PRINTLN("  [vfy] FNV-1a of written flash   = 0x%X", (unsigned)t[i + 1]); i++; continue; }
         if (code == 0xD2u) { FOTA_DEBUG_PRINTLN("  [vfy] VERIFY OK — flash == hpatchi output"); continue; }
         if (code == 0xEAu) { FOTA_DEBUG_PRINTLN("  [vfy] VERIFY FAIL — jumping to DFU!"); continue; }
+        //en: Sanity check: the flasher writes only known step codes. Anything else means
+        //en: the trace region holds stale/foreign flash content (e.g. a fresh board or a
+        //en: previous non-MeshCore firmware) — stop instead of dumping 512 junk lines.
+        //sk: Sanity check: flasher zapisuje len známe kódy krokov. Čokoľvek iné znamená,
+        //sk: že trace región drží starý/cudzí obsah flashe (napr. čerstvá doska alebo
+        //sk: predošlý ne-MeshCore firmware) — zastav, nevypisuj 512 riadkov smetí.
+        uint8_t st = (uint8_t)(code & 0xFFu);
+        bool known = (code <= 0xFFu) &&
+                     (st == 0xFFu || st == 0xFEu ||
+                      (st >= 0x01u && st <= 0x06u) ||
+                      (st >= 0x20u && st <= 0x3Fu) ||
+                      (st >= 0xE0u && st <= 0xE6u));
+        if (!known) {
+            FOTA_DEBUG_PRINTLN("  (entry %lu invalid (0x%lX) — stale/foreign trace region, stopping)",
+                               (unsigned long)i, (unsigned long)code);
+            break;
+        }
         FOTA_DEBUG_PRINT("  [%2lu] ", (unsigned long)i);
-        print_step((uint8_t)(code & 0xFFu));
+        print_step(st);
     }
 #endif  // FLASH_TRACE_ADDR
 }

@@ -107,22 +107,21 @@
 #define ZPATCH_MAGIC     0x42494C5Au      /* bytes: 5A 4C 49 42 = 'Z','L','I','B' */
 #define ZPATCH_HDR_SIZE  12u              /* magic(4) + uncomp_size(4) + new_fw_size(4) */
 
-/* ── Debug status marker — NRF_POWER->GPREGRET2 ───────────────────── */
-//en: We use a hardware retention register (0x40000514), NOT RAM.
-//en: Reason: RAM 0x2003FFF0 gets overwritten by the main firmware startup stack
-//en: (SP=0x20040000, the prologue stores LR+regs at 0x2003FFxx) before
-//en: fota_check_flasher_debug() can read it.
-//en: GPREGRET2 survives SYSRESETREQ and the startup code never touches it.
-//en: The SoftDevice is disabled while the flasher runs → a direct write is safe.
-//en: The main firmware reads it via sd_power_gpregret_get(1, &val).
-//en: Compile with -DFLASHER_DEBUG=0 to strip markers from production build.
-//sk: Používame hardwarový retenčný register (0x40000514), NIE RAM.
-//sk: Dôvod: RAM 0x2003FFF0 sa prepisuje main firmware startup stackom
-//sk: (SP=0x20040000, prologue uloží LR+reg na 0x2003FFxx) skôr, ako
-//sk: fota_check_flasher_debug() ho prečíta.
-//sk: GPREGRET2 prežíva SYSRESETREQ a startup code ho nikdy netouchne.
-//sk: SoftDevice je disabled keď flasher beží → direct zápis je bezpečný.
-//sk: Main firmware číta cez sd_power_gpregret_get(1, &val).
+/* ── Debug status marker — fmark ──────────────────────────────────── */
+//en: HISTORY/WARNING: fmark() used to write a "GPREGRET2" register at
+//en: 0x40000514 — that address is NOT GPREGRET2 (real one: 0x40000520;
+//en: 0x514 is RESERVED POWER-peripheral space next to POFCON) and poking
+//en: it corrupted POWER state (T1000-E froze on the next USB plug-in).
+//en: The register marker is GONE: MeshCore builds use the flash trace log
+//en: (ftrace) below, ZephCore uses the FLASHER_MARK_RAM breadcrumb word.
+//en: Do NOT reintroduce POWER register writes here.
+//sk: HISTÓRIA/POZOR: fmark() kedysi zapisoval „GPREGRET2" register na
+//sk: 0x40000514 — tá adresa NIE JE GPREGRET2 (skutočný: 0x40000520;
+//sk: 0x514 je REZERVOVANÝ priestor POWER periférie vedľa POFCON) a zápis
+//sk: rozbíjal stav POWER (T1000-E zamrzol pri najbližšom pripojení USB).
+//sk: Register marker je PREČ: MeshCore buildy používajú flash trace log
+//sk: (ftrace) nižšie, ZephCore FLASHER_MARK_RAM breadcrumb word.
+//sk: NEvracať sem zápisy do POWER registrov.
 #ifndef FLASHER_DEBUG
 #   define FLASHER_DEBUG 1
 #endif
