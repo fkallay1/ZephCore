@@ -666,16 +666,22 @@ void RepeaterMesh::runFotaCli(const char* fargs, char* reply) {
     //sk: Diagnostika rádia (READ-ONLY). ZephCore radio adapter tu nemá surový
     //sk: prístup k SX1262 registrom — hlásime noise floor + RX počítadlá
     //sk: (Arduino build číta RxGain register 0x08AC).
+    //en: agc_reset is always 0 now: upstream dropped the agc_reset_interval pref and
+    //en: resets AGC only after 10 min of RX silence with a frozen noise floor
+    //en: (LoRaRadio.cpp agcIdleMaintenance) — never during a FOTA session with traffic.
+    //sk: agc_reset je teraz vždy 0: upstream zrušil pref agc_reset_interval a AGC
+    //sk: resetuje až po 10 min ticha so zamrznutým noise floorom
+    //sk: (LoRaRadio.cpp agcIdleMaintenance) — počas FOTA session s prevádzkou nikdy.
     FOTA_DEBUG_PRINTLN("[FOTA] AGC nf=%d rxpkts=%lu rxerr=%lu agc_reset=%lus(0=off)",
                        (int)_radio->getNoiseFloor(),
                        (unsigned long)_radio->getPacketsRecv(),
                        (unsigned long)_radio->getPacketsRecvErrors(),
-                       (unsigned long)(((uint32_t)_prefs.agc_reset_interval) * 4));
+                       0UL);
     sprintf(reply, FOTA_TXT_AGC_ZEPHYR_FMT,
             (int)_radio->getNoiseFloor(),
             (unsigned long)_radio->getPacketsRecv(),
             (unsigned long)_radio->getPacketsRecvErrors(),
-            (unsigned long)(((uint32_t)_prefs.agc_reset_interval) * 4));
+            0UL);
   } else {
     //en: WARNING: do NOT combine AGC auto-reset (set agc.reset.interval > 0) with FOTA flashing!
     //en: If AGC resets run during a FOTA session, the next 'fota flash' fails (see the
