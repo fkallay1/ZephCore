@@ -17,23 +17,48 @@
 #include "display.h"
 #endif
 
-#include <ZephyrSensorManager.h>   /* gps_power_off_for_shutdown */
-#include "ui_mesh_actions.h"        /* mesh_disable_power_regulators (weak) */
+#include <zephyr_poweroff.h>
+#include "led_gate.h"               /* shared with the LoRa TX LED */
 
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/pwm.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/kernel.h>
 #include <string.h>
 
-#ifdef CONFIG_POWEROFF
-#include <zephyr/sys/poweroff.h>
-#endif
-
-#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
-#include <hal/nrf_gpio.h>
-#endif
-
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(ui_led, CONFIG_ZEPHCORE_BOARD_LOG_LEVEL);
+
+/* ========== Input axis flip ==========
+ * Shared by both UI variants. Written from the mesh/CLI thread, read from the
+ * input callback; a plain bool is enough. */
+
+static bool input_flipped;
+
+void zephcore_input_set_flipped(bool flipped)
+{
+	input_flipped = flipped;
+}
+
+bool zephcore_input_is_flipped(void)
+{
+	return input_flipped;
+}
+
+uint16_t zephcore_input_map_code(uint16_t code)
+{
+	if (!input_flipped) {
+		return code;
+	}
+
+	switch (code) {
+	case INPUT_KEY_UP:    return INPUT_KEY_DOWN;
+	case INPUT_KEY_DOWN:  return INPUT_KEY_UP;
+	case INPUT_KEY_LEFT:  return INPUT_KEY_RIGHT;
+	case INPUT_KEY_RIGHT: return INPUT_KEY_LEFT;
+	default:              return code;
+	}
+}
 
 /* ========== Startup Chime ========== */
 
@@ -48,31 +73,57 @@ void ui_play_startup_chime(void)
 
 /* ========== LED Heartbeat ========== */
 /*
- * Uses led0 (or led1 fallback) as a heartbeat indicator.
- * Pulse width extends to LED_ON_MSG_MS when there are unread messages,
- * driven by ui_led_get_msg_count() which the button variant overrides.
- *
- * led1 is also claimed as a message indicator in non-repeater companion builds
- * when both led0 and led1 are present. The heartbeat cycle turns led1 on
- * only when msg count > 0, giving a visual unread-message reminder.
+ * Heartbeat on led0 (or led1). The pulse widens while there are unread
+ * messages; with both LEDs present, companions light led1 for unread.
  */
 
-#if DT_NODE_HAS_PROP(DT_ALIAS(led0), gpios)
+/* PWM takes priority over the plain led0/led1 fallback. */
+#if DT_NODE_EXISTS(DT_ALIAS(heartbeat_pwm_led))
+static const struct pwm_dt_spec s_heartbeat_led_pwm =
+	PWM_DT_SPEC_GET(DT_ALIAS(heartbeat_pwm_led));
+#define HAS_HEARTBEAT_LED_PWM 1
+#define HAS_HEARTBEAT_LED 0
+#elif DT_NODE_HAS_PROP(DT_ALIAS(led0), gpios)
 static const struct gpio_dt_spec s_heartbeat_led =
 	GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+#define HAS_HEARTBEAT_LED_PWM 0
 #define HAS_HEARTBEAT_LED 1
 #elif DT_NODE_HAS_PROP(DT_ALIAS(led1), gpios)
 static const struct gpio_dt_spec s_heartbeat_led =
 	GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
+#define HAS_HEARTBEAT_LED_PWM 0
 #define HAS_HEARTBEAT_LED 1
 #else
+#define HAS_HEARTBEAT_LED_PWM 0
 #define HAS_HEARTBEAT_LED 0
+#endif
+
+#define HAS_ANY_HEARTBEAT_LED (HAS_HEARTBEAT_LED_PWM || HAS_HEARTBEAT_LED)
+
+#if HAS_HEARTBEAT_LED_PWM
+static inline bool heartbeat_led_is_ready(void)
+{
+	return pwm_is_ready_dt(&s_heartbeat_led_pwm);
+}
+static inline void heartbeat_led_write(bool on)
+{
+	zephcore_led_pwm_write(&s_heartbeat_led_pwm, on);
+}
+#elif HAS_HEARTBEAT_LED
+static inline bool heartbeat_led_is_ready(void)
+{
+	return gpio_is_ready_dt(&s_heartbeat_led);
+}
+static inline void heartbeat_led_write(bool on)
+{
+	gpio_pin_set_dt(&s_heartbeat_led, on ? 1 : 0);
+}
 #endif
 
 /* Second LED for unread-message indication. Repeaters use led1 for LoRa TX
  * (via lora-tx-led alias) — no offline queue, so this is companion-only. */
-#if HAS_HEARTBEAT_LED && DT_NODE_HAS_PROP(DT_ALIAS(led0), gpios) && \
-    DT_NODE_HAS_PROP(DT_ALIAS(led1), gpios) && !defined(ZEPHCORE_REPEATER)
+#if HAS_ANY_HEARTBEAT_LED && DT_NODE_HAS_PROP(DT_ALIAS(led0), gpios) && \
+	DT_NODE_HAS_PROP(DT_ALIAS(led1), gpios) && !defined(ZEPHCORE_REPEATER)
 static const struct gpio_dt_spec s_msg_led =
 	GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
 #define HAS_MSG_LED 1
@@ -84,10 +135,9 @@ static const struct gpio_dt_spec s_msg_led =
 #define LED_ON_MS         20   /* Normal pulse width */
 #define LED_ON_MSG_MS    200   /* Pulse width when unread messages */
 
-#if HAS_HEARTBEAT_LED
+#if HAS_ANY_HEARTBEAT_LED
 static struct k_work_delayable s_led_on_work;
 static struct k_work_delayable s_led_off_work;
-static bool s_leds_disabled;
 
 /*
  * Weak: returns current unread message count for pulse-width adaptation.
@@ -96,14 +146,45 @@ static bool s_leds_disabled;
  */
 __attribute__((weak)) uint16_t ui_led_get_msg_count(void) { return 0; }
 
+/*
+ * Does the heartbeat LED light on this pass? The cycle keeps running in
+ * every mode, LEDS_HB_OFF included, because the unread indicator is lit from
+ * inside it.
+ */
+static bool hb_should_light(uint16_t msg_count)
+{
+	switch (zephcore_leds_hb_mode()) {
+	case LEDS_HB_OFF:    return false;
+	case LEDS_HB_UNREAD: return msg_count > 0;  /* dark unless there is news */
+	default:             return true;           /* LEDS_HB_ALL, LEDS_HB_HB */
+	}
+}
+
+/* Pulse width for this pass.  LEDS_HB_HB is the "liveness tick only" mode, so
+ * it never widens even when messages are waiting. */
+static uint16_t hb_pulse_ms(uint16_t msg_count)
+{
+	if (zephcore_leds_hb_mode() == LEDS_HB_HB) {
+		return LED_ON_MS;
+	}
+	return (msg_count > 0) ? LED_ON_MSG_MS : LED_ON_MS;
+}
+
 static void led_off_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	gpio_pin_set_dt(&s_heartbeat_led, 0);
+	/* Yield the pin if radio activity is holding it (shared-pin boards only;
+	 * everywhere else this always reads false). Clearing here would blank the
+	 * LED in the middle of a transmit. Routed through heartbeat_led_write()
+	 * rather than a direct gpio_pin_set_dt(), since s_heartbeat_led doesn't
+	 * even exist on PWM-capable boards (see HAS_HEARTBEAT_LED_PWM above). */
+	if (!zephcore_led_radio_holds_pin()) {
+		heartbeat_led_write(false);
+	}
 #if HAS_MSG_LED
 	gpio_pin_set_dt(&s_msg_led, 0);
 #endif
-	uint16_t on_ms = (ui_led_get_msg_count() > 0) ? LED_ON_MSG_MS : LED_ON_MS;
+	uint16_t on_ms = hb_pulse_ms(ui_led_get_msg_count());
 
 	k_work_reschedule(&s_led_on_work, K_MSEC(LED_CYCLE_MS - on_ms));
 }
@@ -112,19 +193,25 @@ static void led_on_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 	uint16_t mc = ui_led_get_msg_count();
-	uint16_t on_ms = (mc > 0) ? LED_ON_MSG_MS : LED_ON_MS;
+	uint16_t on_ms = hb_pulse_ms(mc);
 
-	if (!s_leds_disabled) {
-		gpio_pin_set_dt(&s_heartbeat_led, 1);
+	if (!zephcore_leds_disabled()) {
+		if (hb_should_light(mc) && !zephcore_led_radio_holds_pin()) {
+			heartbeat_led_write(true);
+		}
 #if HAS_MSG_LED
-		if (mc > 0) {
+		/* The unread LED is a separate pin, so it is governed by the mode
+		 * but not by the radio's hold on the heartbeat pin. LEDS_HB_HB is
+		 * the liveness-only mode and deliberately suppresses it. */
+		if (mc > 0 && zephcore_leds_hb_mode() != LEDS_HB_OFF &&
+		    zephcore_leds_hb_mode() != LEDS_HB_HB) {
 			gpio_pin_set_dt(&s_msg_led, 1);
 		}
 #endif
 	}
 	k_work_reschedule(&s_led_off_work, K_MSEC(on_ms));
 }
-#endif /* HAS_HEARTBEAT_LED */
+#endif /* HAS_ANY_HEARTBEAT_LED */
 
 /*
  * Weak: called after s_leds_disabled changes so each UI variant can sync its
@@ -135,9 +222,13 @@ __attribute__((weak)) void ui_led_on_disabled_changed(bool disabled) { ARG_UNUSE
 
 void ui_led_heartbeat_init(void)
 {
+#if HAS_ANY_HEARTBEAT_LED
+	if (heartbeat_led_is_ready()) {
 #if HAS_HEARTBEAT_LED
-	if (gpio_is_ready_dt(&s_heartbeat_led)) {
 		gpio_pin_configure_dt(&s_heartbeat_led, GPIO_OUTPUT_INACTIVE);
+#else
+		heartbeat_led_write(false);
+#endif
 		k_work_init_delayable(&s_led_on_work, led_on_work_handler);
 		k_work_init_delayable(&s_led_off_work, led_off_work_handler);
 		k_work_reschedule(&s_led_on_work, K_NO_WAIT);
@@ -154,15 +245,15 @@ void ui_led_heartbeat_init(void)
 
 void ui_set_heartbeat_led(bool enabled)
 {
-#if HAS_HEARTBEAT_LED
-	if (enabled && !s_leds_disabled) {
-		if (gpio_is_ready_dt(&s_heartbeat_led)) {
+#if HAS_ANY_HEARTBEAT_LED
+	if (enabled && !zephcore_leds_disabled()) {
+		if (heartbeat_led_is_ready()) {
 			k_work_reschedule(&s_led_on_work, K_NO_WAIT);
 		}
 	} else {
 		k_work_cancel_delayable(&s_led_on_work);
 		k_work_cancel_delayable(&s_led_off_work);
-		gpio_pin_set_dt(&s_heartbeat_led, 0);
+		heartbeat_led_write(false);
 #if HAS_MSG_LED
 		gpio_pin_set_dt(&s_msg_led, 0);
 #endif
@@ -172,21 +263,26 @@ void ui_set_heartbeat_led(bool enabled)
 #endif
 }
 
-void ui_set_leds_disabled(bool disabled)
+/*
+ * Strong override of the weak hook in led_gate.c: react to a gate change from
+ * anywhere (UI toggle, "set leds", boot). Stops or restarts the heartbeat cycle
+ * and refreshes the UI's LED page. The gate flag itself is already set by the
+ * time we get here — do NOT call back into ui_set_leds_disabled() from here.
+ */
+void zephcore_leds_ui_sync(bool disabled)
 {
-#if HAS_HEARTBEAT_LED
-	s_leds_disabled = disabled;
+#if HAS_ANY_HEARTBEAT_LED
 	if (disabled) {
 		k_work_cancel_delayable(&s_led_on_work);
 		k_work_cancel_delayable(&s_led_off_work);
-		gpio_pin_set_dt(&s_heartbeat_led, 0);
+		heartbeat_led_write(false);
 #if HAS_MSG_LED
 		gpio_pin_set_dt(&s_msg_led, 0);
 #endif
 	} else if (!k_work_delayable_is_pending(&s_led_on_work) &&
 		   !k_work_delayable_is_pending(&s_led_off_work)) {
 		/* Restart heartbeat only if it was stopped (avoids spurious pulse) */
-		if (gpio_is_ready_dt(&s_heartbeat_led)) {
+		if (heartbeat_led_is_ready()) {
 			k_work_reschedule(&s_led_on_work, K_NO_WAIT);
 		}
 	}
@@ -196,32 +292,46 @@ void ui_set_leds_disabled(bool disabled)
 	ui_led_on_disabled_changed(disabled);
 }
 
+/* UI-facing spelling of the same thing. Kept because the UI toggle pages and
+ * the companion boot path call it by this name; the gate is what actually
+ * governs every LED. */
+void ui_set_leds_disabled(bool disabled)
+{
+	zephcore_leds_set_disabled(disabled);
+}
+
 /* Flash the heartbeat LED immediately on message receipt.
  * Cancels the current cycle, pulses at LED_ON_MSG_MS width, then the
  * work chain resumes the normal heartbeat automatically.
- * No-op when LEDs are disabled or hardware is absent. */
+ * No-op when LEDs are disabled, when leds.hb is "hb" or "off" (the modes
+ * that never show message activity), or when hardware is absent. */
 void ui_led_flash_msg(void)
 {
-#if HAS_HEARTBEAT_LED
-	if (!s_leds_disabled && gpio_is_ready_dt(&s_heartbeat_led)) {
+#if HAS_ANY_HEARTBEAT_LED
+	uint8_t hb = zephcore_leds_hb_mode();
+
+	if (!zephcore_leds_disabled() && heartbeat_led_is_ready() &&
+	    (hb == LEDS_HB_ALL || hb == LEDS_HB_UNREAD)) {
 		k_work_cancel_delayable(&s_led_on_work);
 		k_work_cancel_delayable(&s_led_off_work);
-		gpio_pin_set_dt(&s_heartbeat_led, 1);
+		heartbeat_led_write(true);
 		k_work_reschedule(&s_led_off_work, K_MSEC(LED_ON_MSG_MS));
 	}
 #endif
 }
 
 /* Flash the heartbeat LED 3 times on shutdown.
- * Used as a visual power-off indicator when the buzzer is muted. */
+ * Used as a visual power-off indicator when the buzzer is muted.
+ * Suppressed by "set leds off" — a node the user asked to keep dark stays dark
+ * even at power-off. */
 void ui_led_flash_shutdown(void)
 {
-#if HAS_HEARTBEAT_LED
-	if (gpio_is_ready_dt(&s_heartbeat_led)) {
+#if HAS_ANY_HEARTBEAT_LED
+	if (!zephcore_leds_disabled() && heartbeat_led_is_ready()) {
 		for (int i = 0; i < 3; i++) {
-			gpio_pin_set_dt(&s_heartbeat_led, 1);
+			heartbeat_led_write(true);
 			k_sleep(K_MSEC(100));
-			gpio_pin_set_dt(&s_heartbeat_led, 0);
+			heartbeat_led_write(false);
 			if (i < 2) {
 				k_sleep(K_MSEC(100));
 			}
@@ -238,18 +348,15 @@ void ui_led_flash_shutdown(void)
 #define UI_BATT_REFRESH_MS  30000
 
 static uint16_t (*s_batt_provider)(void);
+/* The board's own percentage: its discharge curve, or the fuel gauge. */
+static uint8_t (*s_batt_pct_provider)(void);
 static uint32_t s_batt_last_read_ms;
 static bool s_batt_ever_read;
-static bool (*s_power_source_provider)(void);
 
-void ui_set_battery_provider(uint16_t (*provider)(void))
+void ui_set_battery_provider(uint16_t (*mv)(void), uint8_t (*pct)(void))
 {
-	s_batt_provider = provider;
-}
-
-void ui_set_power_source_provider(bool (*provider)(void))
-{
-	s_power_source_provider = provider;
+	s_batt_provider = mv;
+	s_batt_pct_provider = pct;
 }
 
 void ui_refresh_battery(void)
@@ -261,7 +368,8 @@ void ui_refresh_battery(void)
 	if (s_batt_ever_read && (now - s_batt_last_read_ms) < UI_BATT_REFRESH_MS) {
 		return;
 	}
-	ui_set_battery(s_batt_provider(), 0);
+	uint16_t mv = s_batt_provider();
+	ui_set_battery(mv, (mv && s_batt_pct_provider) ? s_batt_pct_provider() : 0);
 	s_batt_last_read_ms = k_uptime_get_32();
 	s_batt_ever_read = true;
 }
@@ -275,116 +383,24 @@ void ui_invalidate_battery_cache(void)
 	s_batt_last_read_ms = 0;
 }
 
-/* ========== System OFF preparation ==========
- * Shared by both UI variants. Caller is responsible for any shutdown chime
- * and the final sys_poweroff() call; this just leaves the SoC + peripherals
- * in the lowest-power state with a wakeup source armed.
- *
- * On nRF52 the SoC enters System OFF (~1 µA) but GPIO output latches and
- * SENSE bits persist across the transition — so we must explicitly:
- *   - hold every power-enable GPIO LOW so external chips don't keep drawing
- *   - hold the LoRa radio in HW reset (its internal duty cycle would
- *     otherwise keep cycling autonomously, drawing mA)
- *   - configure SENSE on sw0 so a button press wakes the chip (the nRF GPIO
- *     driver doesn't honour the DT wakeup-source property, so the dtsi
- *     marker is inert without this)
- *
- * Non-nRF platforms skip the SENSE block; they rely on Zephyr's wakeup-source
- * DT property which is honoured by their respective GPIO drivers.
- */
-void ui_prepare_for_system_off(void)
+/* ========== Power-off: the UI's part ==========
+ * zephcore_power_off() (adapters/board/zephyr_poweroff.c) runs this first,
+ * then powers the board down. */
+void ui_before_power_off(void)
 {
-	/* 1. Stop heartbeat LED cycle (cancels both works). */
+	/* Stop heartbeat LED cycle (cancels both works). */
 	ui_set_heartbeat_led(false);
 
-	/* 2. Display off — content stays visible on EPD, blanks on OLED. */
+	/* Display off — content stays visible on EPD, blanks on OLED. */
 #ifdef CONFIG_ZEPHCORE_UI_DISPLAY
 	mc_display_off();
 #endif
-
-	/* 3. Drive power-enable GPIOs LOW so peripherals don't keep drawing.
-	 * Do NOT touch BLE here — that corrupts controller state and prevents
-	 * clean reboot on wake. */
-	gps_power_off_for_shutdown();
-	mesh_disable_power_regulators();   /* weak-stubbed on non-companion roles */
-
-	/* 4. Hold LoRa radio in HW reset.
-	 * SX126x/LR11xx duty-cycle mode would otherwise keep the radio cycling
-	 * autonomously (mA) while the SoC is in System OFF.  nRF52 output
-	 * latches persist across System OFF → chip stays in reset (~0 µA). */
-#if DT_NODE_EXISTS(DT_ALIAS(lora0)) && DT_NODE_HAS_PROP(DT_ALIAS(lora0), reset_gpios)
-	{
-		static const struct gpio_dt_spec lora_reset =
-			GPIO_DT_SPEC_GET(DT_ALIAS(lora0), reset_gpios);
-		gpio_pin_configure_dt(&lora_reset, GPIO_OUTPUT_ACTIVE);
-	}
-#endif
-
-	/* 5. Configure GPIO SENSE for sw0 button wakeup, after waiting for the
-	 * user to release any held button (otherwise DETECT is already asserted
-	 * when we enter System OFF and the chip never sleeps cleanly).
-	 * nRF only — other platforms rely on the DT wakeup-source property. */
-#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF) && DT_NODE_EXISTS(DT_ALIAS(sw0))
-	{
-#define _SW0_NODE  DT_ALIAS(sw0)
-#define _SW0_PORT  DT_PROP(DT_GPIO_CTLR(_SW0_NODE, gpios), port)
-#define _SW0_PIN   DT_GPIO_PIN(_SW0_NODE, gpios)
-#define _SW0_FLAGS DT_GPIO_FLAGS(_SW0_NODE, gpios)
-
-		static const struct gpio_dt_spec sw0 =
-			GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
-		gpio_pin_configure_dt(&sw0, GPIO_INPUT);
-
-		int64_t deadline = k_uptime_get() + 5000;
-		while (gpio_pin_get_dt(&sw0) && k_uptime_get() < deadline) {
-			k_sleep(K_MSEC(10));
-		}
-
-		nrf_gpio_cfg_sense_input(
-			NRF_GPIO_PIN_MAP(_SW0_PORT, _SW0_PIN),
-			(_SW0_FLAGS & GPIO_PULL_UP)   ? NRF_GPIO_PIN_PULLUP   :
-			(_SW0_FLAGS & GPIO_PULL_DOWN) ? NRF_GPIO_PIN_PULLDOWN :
-						       NRF_GPIO_PIN_NOPULL,
-			(_SW0_FLAGS & GPIO_ACTIVE_LOW) ? NRF_GPIO_PIN_SENSE_LOW
-						       : NRF_GPIO_PIN_SENSE_HIGH);
-#undef _SW0_NODE
-#undef _SW0_PORT
-#undef _SW0_PIN
-#undef _SW0_FLAGS
-	}
-#endif /* CONFIG_SOC_FAMILY_NORDIC_NRF && sw0 */
 }
 
-/* ========== Low-battery auto-shutdown ==========
- * Companion only. Driven off the existing housekeeping tick — self-throttled,
- * so there is no dedicated poll. Disabled entirely (compiled out) unless a
- * board sets CONFIG_ZEPHCORE_AUTO_SHUTDOWN_MILLIVOLTS > 0. */
-#if defined(CONFIG_ZEPHCORE_AUTO_SHUTDOWN_MILLIVOLTS) && \
-	CONFIG_ZEPHCORE_AUTO_SHUTDOWN_MILLIVOLTS > 0
-
-/* How often we actually sample the ADC for the shutdown check. The caller
- * fires every housekeeping tick (~5 s); this gate keeps the divider from
- * being energised more than necessary while still catching a sagging cell
- * well before it collapses. */
-#define UI_AUTO_SHUTDOWN_CHECK_MS  30000
-
-/* Consecutive below-threshold readings required before shutdown.
- * 3 hits × 30 s = 90 s confirm window — a single TX-induced sag that
- * lands on a check window won't trigger a false shutdown. */
-#define UI_AUTO_SHUTDOWN_CONFIRM_COUNT  3
-
-/* Runtime threshold (mV); 0 disables. Seeded from the Kconfig default, then
- * overridden at boot from prefs and live via the CLI (ui_set_auto_shutdown_mv). */
-static uint16_t s_auto_shutdown_mv = CONFIG_ZEPHCORE_AUTO_SHUTDOWN_MILLIVOLTS;
-static uint8_t  s_low_count;
-
-void ui_set_auto_shutdown_mv(uint16_t mv)
-{
-	s_auto_shutdown_mv = mv;
-}
-
+/* ========== Low-battery warning screen ==========
+ * The policy itself is app/PowerPolicy.cpp. */
 #ifdef CONFIG_ZEPHCORE_UI_DISPLAY
-static void auto_shutdown_warn_screen(void)
+void ui_show_low_battery(bool hold)
 {
 	/* Wake the panel (OLED may be blanked by auto-off; EPD is always
 	 * visible). Centre two lines; the message persists on e-paper after
@@ -409,68 +425,21 @@ static void auto_shutdown_warn_screen(void)
 	mc_display_finalize();
 
 	/* OLED blanks the instant power drops, so hold long enough to read it.
-	 * EPD keeps the image with no power, so skip the delay. */
-	if (!mc_display_is_epd()) {
+	 * EPD keeps the image with no power, so skip the delay. The deferred-
+	 * poweroff (grace) path passes hold=false: it must NOT block the main
+	 * thread, because that thread has to service the app's message fetch
+	 * during the grace window — the grace timer provides the on-screen dwell
+	 * instead. */
+	if (hold && !mc_display_is_epd()) {
 		k_sleep(K_MSEC(3000));
 	}
 }
-#endif /* CONFIG_ZEPHCORE_UI_DISPLAY */
-
-void ui_auto_shutdown_check(void)
-{
-	if (!s_batt_provider || s_auto_shutdown_mv == 0) {
-		return;  /* no battery provider, or runtime-disabled */
-	}
-
-	uint32_t now = k_uptime_get_32();
-	static uint32_t next_check_ms;   /* 0 at boot → first tick samples */
-	if (next_check_ms != 0 && (now - next_check_ms) < UI_AUTO_SHUTDOWN_CHECK_MS) {
-		return;
-	}
-	next_check_ms = now;
-
-	uint16_t mv = s_batt_provider();
-	if (mv == 0 || mv >= s_auto_shutdown_mv) {
-		s_low_count = 0;
-		return;  /* no battery hardware / reading, or healthy */
-	}
-
-	/* Don't power off while charging or USB-powered — the reading is the
-	 * cell, not the supply, and yanking power on a bench cable is annoying. */
-	if (s_power_source_provider && s_power_source_provider()) {
-		LOG_INF("auto-shutdown: %u mV below threshold but externally powered", mv);
-		s_low_count = 0;
-		return;
-	}
-
-	s_low_count++;
-	LOG_WRN("auto-shutdown: battery %u mV < %u mV (%u/%u)",
-		mv, s_auto_shutdown_mv, s_low_count, UI_AUTO_SHUTDOWN_CONFIRM_COUNT);
-	if (s_low_count < UI_AUTO_SHUTDOWN_CONFIRM_COUNT) {
-		return;
-	}
-
-	LOG_WRN("auto-shutdown: confirmed — powering off");
-
-#ifdef CONFIG_ZEPHCORE_UI_DISPLAY
-	auto_shutdown_warn_screen();
-#endif
-
-#ifdef CONFIG_POWEROFF
-	ui_prepare_for_system_off();
-	sys_poweroff();
-	CODE_UNREACHABLE;
 #else
-	LOG_WRN("auto-shutdown: CONFIG_POWEROFF not enabled — cannot power off");
-#endif
+void ui_show_low_battery(bool hold)
+{
+	ARG_UNUSED(hold);
 }
-
-#else  /* feature disabled (non-nRF52 / threshold default 0) */
-
-void ui_set_auto_shutdown_mv(uint16_t mv) { (void)mv; }
-void ui_auto_shutdown_check(void) { }
-
-#endif /* CONFIG_ZEPHCORE_AUTO_SHUTDOWN_MILLIVOLTS > 0 */
+#endif
 
 /* ========== Shared splash logo ==========
  * 128×13 ZephCore wordmark, MSB-first row-major (Adafruit XBM/drawBitmap

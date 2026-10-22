@@ -14,6 +14,16 @@ LOG_MODULE_REGISTER(zephcore_utils, CONFIG_ZEPHCORE_MAIN_LOG_LEVEL);
 
 namespace mesh {
 
+uint32_t RNG::nextInt(uint32_t _min, uint32_t _max)
+{
+	uint32_t num;
+	random((uint8_t *)&num, sizeof(num));
+	if (_max <= _min) {	/* ZEPHCORE: no modulo by zero */
+		return _min;
+	}
+	return (num % (_max - _min)) + _min;
+}
+
 static uint8_t hexVal(char c)
 {
 	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
@@ -69,7 +79,7 @@ fail:
 
 /* AES-ECB using PSA Crypto (ECB_NO_PADDING) */
 static int aes_ecb_crypt(const uint8_t *key, size_t key_len, const uint8_t *src, int src_len,
-                         uint8_t *dest, bool encrypt)
+			 uint8_t *dest, bool encrypt)
 {
 	if (src_len % 16 != 0) {
 		LOG_ERR("src_len=%d not multiple of 16", src_len);
@@ -179,14 +189,18 @@ int Utils::encryptThenMAC(const uint8_t *shared_secret, uint8_t *dest, const uin
 int Utils::MACThenDecrypt(const uint8_t *shared_secret, uint8_t *dest, const uint8_t *src, int src_len)
 {
 	if (src_len <= (int)CIPHER_MAC_SIZE) return 0;
+
+	int enc_len = src_len - CIPHER_MAC_SIZE;
+	if (enc_len % CIPHER_BLOCK_SIZE != 0) return 0;  /* reject non-block-aligned ciphertext */
+
 	uint8_t computed_mac[CIPHER_MAC_SIZE];
-	if (compute_hmac_truncated(shared_secret, PUB_KEY_SIZE, src + CIPHER_MAC_SIZE, (size_t)src_len - CIPHER_MAC_SIZE, computed_mac, CIPHER_MAC_SIZE) != 0)
+	if (compute_hmac_truncated(shared_secret, PUB_KEY_SIZE, src + CIPHER_MAC_SIZE, (size_t)enc_len, computed_mac, CIPHER_MAC_SIZE) != 0)
 		return 0;
 	/* Constant-time MAC compare. Runs on every encrypted packet — a
 	 * timing oracle here would let attackers forge MACs byte-by-byte
 	 * across the entire mesh, bypassing message authentication. */
 	if (!Utils::constantTimeEqual(computed_mac, src, CIPHER_MAC_SIZE)) return 0;
-	return decrypt(shared_secret, dest, src + CIPHER_MAC_SIZE, src_len - CIPHER_MAC_SIZE);
+	return decrypt(shared_secret, dest, src + CIPHER_MAC_SIZE, enc_len);
 }
 
 /* See header for rationale. The `volatile` accumulator forces
@@ -245,6 +259,16 @@ void Utils::toHex(char *dest, const uint8_t *src, size_t len)
 	*dest = 0;
 }
 
+void Utils::printHex(Stream &s, const uint8_t *src, size_t len)
+{
+	while (len > 0) {
+		uint8_t b = *src++;
+		s.print(hex_chars[b >> 4]);
+		s.print(hex_chars[b & 0x0F]);
+		len--;
+	}
+}
+
 bool Utils::fromHex(uint8_t *dest, int dest_size, const char *src_hex)
 {
 	size_t len = strlen(src_hex);
@@ -254,6 +278,16 @@ bool Utils::fromHex(uint8_t *dest, int dest_size, const char *src_hex)
 		char ch = *src_hex++;
 		char cl = *src_hex++;
 		*dp++ = (uint8_t)((hexVal(ch) << 4) | hexVal(cl));
+	}
+	return true;
+}
+
+bool Utils::isZeroes(const uint8_t *buf, size_t len)
+{
+	while (len > 0) {
+		if (*buf != 0) return false;
+		buf++;
+		len--;
 	}
 	return true;
 }

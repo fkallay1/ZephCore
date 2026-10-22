@@ -2,8 +2,9 @@
  * SenseCAP Solar — ZephCore overlay
  * SPDX-License-Identifier: MIT
  *
- * GPS aliases for ZephyrGPSManager. gnss-nmea-generic has no on-off-gpios,
- * so ZephyrGPSManager owns P1.05 (gps-enable alias) exclusively.
+ * GPS aliases for ZephyrGPSManager. P1.05 (gps-enable alias) is shared
+ * with the air530z driver's on-off-gpios (T-Echo pattern): the driver
+ * powers the module at init, ZephyrGPSManager duty-cycles it after.
  */
 
 #include "../../common/qspi-ext.dtsi"
@@ -25,8 +26,21 @@
 		};
 	};
 
+	/* L76KB WAKEUP (schematic net GNSS_WAKEUP, P0.02; upstream's
+	 * PIN_GPS_STANDBY): HIGH = run, LOW = Standby with the supply kept.
+	 * The GPS manager uses it for duty-cycle standby, so a wake is a hot
+	 * start; P1.05 is cut on `gps off` and System OFF. */
+	gps_wake: gps-wakeup {
+		compatible = "gpio-leds";
+		gps_wakeup_pin: gps_wakeup {
+			gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+			label = "GNSS Wakeup";
+		};
+	};
+
 	aliases {
 		gps-enable = &gps_enable_pin;
 		gps-reset = &gps_reset_pin;
+		gps-wakeup = &gps_wakeup_pin;
 	};
 };

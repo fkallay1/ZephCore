@@ -287,6 +287,17 @@ public:
 	bool handleInput(char c) override;
 };
 
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+/* ===== WifiScreen: WiFi companion state and the address the app uses ===== */
+class WifiScreen : public UIScreen {
+	JoystickUITask *_task;
+public:
+	WifiScreen(JoystickUITask *task);
+	int render(JoystickDisplay &display) override;
+	bool handleInput(char c) override;
+};
+#endif
+
 /* ===== StopwatchScreen ===== */
 class StopwatchScreen : public UIScreen {
 	JoystickUITask *_task;
@@ -423,6 +434,12 @@ public:
 	int render(JoystickDisplay &display) override;
 	bool handleInput(char c) override;
 	void onExit() override;
+
+private:
+	/* handleInput(), one per mode */
+	bool handleMsgViewKey(char key);
+	bool handleSubmenuKey(char key);
+	bool handleEditPathKey(char key);
 };
 
 /* ===== UnreadScreen ===== */
@@ -497,6 +514,11 @@ public:
 	void onExit() override;
 
 private:
+	/* handleInput(), one per state */
+	bool handlePasswordKey(char c);
+	bool handleSubmenuKey(char c);
+	bool handleMainKey(char c);
+	bool handleCmdInputKey(char c);
 	struct k_timer _timeout_timer;
 	static void timeoutTimerCb(struct k_timer *t);
 	void onTimeout();   /* called from main thread when _timeout_timer fires */

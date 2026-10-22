@@ -6,16 +6,25 @@
  * Integration layer that wires buttons, buzzer, and display together.
  * All event-driven via Zephyr input subsystem + k_work.
  *
- * Input flow (after longpress + multi-tap filter chain):
+ * Input flow (after longpress + multi-tap filter chain).  This file maps
+ * key code → action only; which gesture emits which code is per-board, set by
+ * the tap-codes array in that board's devicetree.  Tap counts below are the
+ * common case, not a guarantee — e.g. Heltec T096 has no buzzer and gives the
+ * 2-tap slot to page-prev, pushing KEY_B out to 3 taps.
+ *
  *   KEY_1     → action_page_next()       (1 tap, 400ms delayed)
- *   KEY_LEFT  → action_page_prev()       (2 taps — RAK4631 / Pocket / Heltec V3–V4.3)
- *   KEY_B     → action_flood_advert()    (2 taps on extended multitap overlays)
- *   KEY_D     → action_buzzer_toggle()   (3 taps)
- *   KEY_C     → action_gps_toggle()      (4 taps, immediate)
+ *   KEY_LEFT  → action_page_prev()       (2 taps on boards with a screen)
+ *   KEY_B     → action_leds_toggle()     (LED heartbeat; 2 taps stock)
+ *   KEY_D     → action_buzzer_toggle()   (notification mode; 3 taps stock)
+ *   KEY_C     → action_gps_toggle()      (4 taps)
+ *   KEY_E     → action_flood_advert()    (5 taps)
  *   KEY_G     → GPS switch on/off        (hardware toggle, ThinkNode M1)
  *   KEY_POWER / KEY_F → action_deep_sleep() (long press — boards that emit these)
  *   KEY_ENTER → action_page_enter()      (long press — Pocket / Heltec; joystick center Wio)
  *   KEY_RIGHT → action_page_next()       (joystick, Wio Tracker)
+ *
+ * The last entry of a board's tap-codes fires immediately (no tap-delay-ms
+ * wait) — the filter knows no further tap can extend it.
  *
  * Notification flow:
  *   LoRa RX → CompanionMesh → ui_notify(UI_EVENT_CONTACT_MSG)
@@ -25,6 +34,7 @@
 
 #include "ui_task.h"
 #include "ui_pages.h"
+#include <helpers/buzzer_gate.h>
 #include <time_sync.h>
 
 #ifdef CONFIG_ZEPHCORE_UI_BUZZER
@@ -43,20 +53,15 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/input/input.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <stdio.h>
 #include <string.h>
 
-#ifdef CONFIG_POWEROFF
-#include <zephyr/sys/poweroff.h>
-#endif
-
-#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
-#include <hal/nrf_gpio.h>
-#endif
+#include <zephyr_poweroff.h>
 
 #include <zephyr/sys/reboot.h>
 
-/* GPS control (extern "C" in ZephyrSensorManager.h) */
-#include <ZephyrSensorManager.h>
+/* GPS control */
+#include <ZephyrGPSManager.h>
 
 /* Mesh action wrappers (deferred to mesh event loop thread) */
 #include "ui_mesh_actions.h"
@@ -67,15 +72,12 @@ extern void ui_led_flash_msg(void);
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(ui_task, CONFIG_ZEPHCORE_BOARD_LOG_LEVEL);
 
-/* Tap-count feedback melodies.
- * b=200, d=16 → each chirp ~75ms, rest ~75ms = clear separation.
- *
- * 2 taps (flood advert):  chirp-chirp
- * 3 taps (buzzer toggle): chirp×3 + high(ON) or low(OFF)
- * 4 taps (GPS toggle):    chirp×4 + high(ON) or low(OFF)
- *
- * ON tail:  high E7 (~2637Hz) = "enabled"
- * OFF tail: low G5 (~784Hz)   = "disabled"  */
+/* Action feedback melodies (b=200, d=16: ~75 ms chirps). The chirp count
+ * identifies the action, not the tap count.
+ *   advert sent:                 chirp x2
+ *   buzzer / notification mode:  chirp x3 + high (on) or low (off)
+ *   GPS toggle:                  chirp x4 + high or low
+ *   LED heartbeat toggle:        chirp x5 + high or low */
 #define MELODY_BEEP_2     "b2:d=16,o=7,b=200:c,p,c"
 
 #define MELODY_BUZZER_ON  "bon:d=16,o=7,b=200:c,p,c,p,c,p,p,8e"
@@ -162,6 +164,14 @@ static void render_work_handler(struct k_work *work)
 	 * OLED: only render when display is on (screen is black when off). */
 	if ((mc_display_is_on() || mc_display_is_epd()) && !splash_active) {
 		ui_pages_render();
+
+		/* Tiny panels flash the page title on a change, then need one
+		 * more render to swap it for content once the flash expires. */
+		uint32_t flash_ms = ui_pages_flash_remaining_ms();
+
+		if (flash_ms > 0) {
+			k_work_reschedule(&render_work, K_MSEC(flash_ms + 20));
+		}
 	}
 #endif
 }
@@ -186,6 +196,7 @@ static void splash_work_handler(struct k_work *work)
 
 static void schedule_render(void);
 static void schedule_render_auto(void);
+static void set_app_connected(bool connected);
 
 static void advert_defer_handler(struct k_work *work)
 {
@@ -268,12 +279,12 @@ static void action_page_enter(void)
 		break;
 
 	case UI_PAGE_GPS:
-		/* Toggle GPS (same as quad-tap) */
+		/* Toggle GPS (same as the KEY_C tap action) */
 		action_gps_toggle();
 		break;
 
 	case UI_PAGE_BUZZER:
-		/* Toggle buzzer mute (same as triple-tap) */
+		/* Cycle notification mode (same as the KEY_D tap action) */
 		action_buzzer_toggle();
 		break;
 
@@ -295,7 +306,7 @@ static void action_page_enter(void)
 			st_og->offgrid_confirm_time = 0;
 			mesh_set_offgrid_mode(new_state);
 			LOG_INF("offgrid mode %s (button)", new_state ? "on" : "off");
-		} else {
+		} else if (st_og->offgrid_enabled || mesh_offgrid_available()) {
 			/* First press — enter confirmation state */
 			st_og->offgrid_confirm_time = now_og;
 		}
@@ -400,26 +411,28 @@ static void action_flood_advert(void)
 	schedule_render();
 }
 
+/* Cycles sound -> vibrate -> silent -> sound. Boards with no motor skip the
+ * middle step, so they keep the plain on/off toggle they always had. */
 static void action_buzzer_toggle(void)
 {
 #ifdef CONFIG_ZEPHCORE_UI_BUZZER
-	bool was_quiet = buzzer_is_quiet();
+	uint8_t mode = zephcore_buzzer_next_mode(get_state()->buzzer_mode);
 
-	if (was_quiet) {
-		/* Unmuting: enable first, then play ascending confirmation */
-		buzzer_set_quiet(false);
+	if (zephcore_buzzer_mode_audible(mode)) {
+		/* Enable first, then play the ascending confirmation */
+		zephcore_buzzer_set_mode(mode, false);
 		buzzer_play(MELODY_BUZZER_ON);
 	} else {
-		/* Muting: play descending confirmation while still enabled.
-		 * Use deferred mute so the "off" melody plays out fully
-		 * before the quiet flag suppresses future sounds. */
+		/* Play the descending confirmation while still audible — the
+		 * deferred mute lets it finish before sounds are suppressed. */
 		buzzer_play(MELODY_BUZZER_OFF);
-		buzzer_set_quiet_deferred(true);
+		zephcore_buzzer_set_mode(mode, true);
 	}
-	/* Persist mute state across reboots */
-	mesh_set_buzzer_quiet(!was_quiet);
-	get_state()->buzzer_quiet = !was_quiet;
-	LOG_INF("buzzer %s", buzzer_is_quiet() ? "muted" : "unmuted");
+
+	/* Persist across reboots */
+	mesh_set_buzzer_mode(mode);
+	get_state()->buzzer_mode = mode;
+	LOG_INF("buzzer mode=%u", mode);
 #endif
 	schedule_render();
 }
@@ -510,20 +523,45 @@ static void action_deep_sleep(void)
 	}
 #endif
 
-	/* Shared peripheral teardown + SENSE config for sw0 wake.
-	 * Single source of truth in helpers/ui/ui_common.c so the joystick
-	 * UI variant ends up in the same low-power state. */
-	ui_prepare_for_system_off();
-
-	LOG_INF("deep sleep: entering System OFF");
-	sys_poweroff();
-	CODE_UNREACHABLE;
+	/* The one power-off path (adapters/board/zephyr_poweroff.c), shared
+	 * with the joystick UI and the CLI. */
+	zephcore_shutdown_reason_save(ZC_SHUTDOWN_USER);
+	zephcore_power_off();
 #else
 	LOG_WRN("deep sleep: CONFIG_POWEROFF not enabled");
 #endif
 }
 
 /* ========== Input Event Handler ========== */
+
+#ifdef CONFIG_ZEPHCORE_UI_DISPLAY
+/* Set when a button press woke the display; the action code that press
+ * resolves to (emitted later by the longpress / multi-tap filters) is then
+ * swallowed. Armed only when the wake press was a raw code with an action
+ * code still to come. */
+static bool display_woken_pending;
+
+static bool is_ui_action_code(uint16_t code)
+{
+	switch (code) {
+	case INPUT_KEY_1:
+	case INPUT_KEY_B:
+	case INPUT_KEY_D:
+	case INPUT_KEY_C:
+	case INPUT_KEY_E:
+	case INPUT_KEY_POWER:
+	case INPUT_KEY_F:
+	case INPUT_KEY_RIGHT:
+	case INPUT_KEY_LEFT:
+	case INPUT_KEY_ENTER:
+	case INPUT_KEY_UP:
+	case INPUT_KEY_DOWN:
+		return true;
+	default:
+		return false;
+	}
+}
+#endif /* CONFIG_ZEPHCORE_UI_DISPLAY */
 
 static void ui_input_cb(struct input_event *evt, void *user_data)
 {
@@ -533,11 +571,18 @@ static void ui_input_cb(struct input_event *evt, void *user_data)
 		return;
 	}
 
+	/* Joystick axis flip for upside-down mounts.  Mapped into a local rather
+	 * than written back into the event: the input event is shared with every
+	 * other INPUT_CALLBACK_DEFINE consumer on the bus, and this remap is a
+	 * UI-layer convention, not a hardware fact.  Non-directional codes pass
+	 * through untouched, so the tap-code and longpress paths are unaffected. */
+	const uint16_t code = zephcore_input_map_code(evt->code);
+
 #ifdef CONFIG_ZEPHCORE_EASTER_EGG_DOOM
 	/* When Doom is running, intercept ALL input (presses AND releases) */
 	if (doom_game_is_running()) {
 		/* Double-click ENTER to exit: detect two presses within 500ms */
-		if (evt->code == INPUT_KEY_ENTER && evt->value) {
+		if (code == INPUT_KEY_ENTER && evt->value) {
 			static uint32_t doom_last_enter;
 			uint32_t now = k_uptime_get_32();
 
@@ -553,7 +598,7 @@ static void ui_input_cb(struct input_event *evt, void *user_data)
 		}
 
 		/* Forward all key events (press + release) to Doom */
-		doom_game_input(evt->code, evt->value);
+		doom_game_input(code, evt->value);
 		return;
 	}
 #endif
@@ -561,7 +606,7 @@ static void ui_input_cb(struct input_event *evt, void *user_data)
 	/* GPS hardware switch (toggle switch, not momentary button).
 	 * Needs both press (ON) and release (OFF) events,
 	 * so handle before the release-event filter below. */
-	if (evt->code == INPUT_KEY_G) {
+	if (code == INPUT_KEY_G) {
 		bool gps_on = (evt->value != 0);
 		LOG_INF("GPS switch → %s", gps_on ? "on" : "off");
 		if (gps_is_available()) {
@@ -580,9 +625,11 @@ static void ui_input_cb(struct input_event *evt, void *user_data)
 	}
 
 #ifdef CONFIG_ZEPHCORE_UI_DISPLAY
-	/* If display is off, wake it and consume the event */
+	/* Display off: wake it and consume the event. Arm display_woken_pending only
+	 * if the consumed code is a raw one, whose action code arrives later. */
 	if (!mc_display_is_on()) {
 		mc_display_on();
+		display_woken_pending = !is_ui_action_code(code);
 		schedule_render();
 		return;
 	}
@@ -608,43 +655,43 @@ static void ui_input_cb(struct input_event *evt, void *user_data)
 		return;
 	}
 
-	/* Map input key codes to UI actions.
-	 *
-	 * RAK4631 / WisMesh Pocket / Heltec V3–V4.3: 1 tap KEY_1, 2 taps KEY_LEFT;
-	 * long press KEY_ENTER (page enter). Other boards: up to 4–5 tap codes
-	 * (KEY_B/D/C/E) and KEY_POWER or KEY_F long → deep sleep.
-	 * KEY_RIGHT/LEFT/ENTER/UP/DOWN: joystick (Wio Tracker)
-	 *
-	 * NOTE: KEY_A (raw short-press from longpress filter) is NOT handled
-	 * here. It feeds into the multi-tap filter which emits the tap codes.
-	 * Since INPUT_CALLBACK_DEFINE(NULL) sees events from all devices,
-	 * the raw KEY_A events fall through to default: break.
-	 */
-	switch (evt->code) {
+#ifdef CONFIG_ZEPHCORE_UI_DISPLAY
+	/* This is the action the wake-up press resolved to — swallow it so the
+	 * press only woke the display, on whatever page it was showing. */
+	if (display_woken_pending && is_ui_action_code(code)) {
+		display_woken_pending = false;
+		return;
+	}
+#endif
+
+	/* Map input key codes to UI actions. Which gesture produces which code is
+	 * the board's business (tap-codes note at the top of this file). Raw KEY_A
+	 * is not handled here: it feeds the multi-tap filter. */
+	switch (code) {
 	/* ===== Multi-tap outputs ===== */
 	case INPUT_KEY_1:
-		/* Single tap (400ms delayed): page next */
+		/* First tap-codes entry (400ms delayed): page next */
 		action_page_next();
 		break;
 
 	case INPUT_KEY_B:
-		/* Double tap (400ms delayed): flood advert */
-		action_flood_advert();
+		/* Toggle LED heartbeat (2 taps stock, 3 on T096) */
+		action_leds_toggle();
 		break;
 
 	case INPUT_KEY_D:
-		/* Triple tap (400ms delayed): toggle buzzer mute */
+		/* Cycle notification mode; no-op where UI_BUZZER=n */
 		action_buzzer_toggle();
 		break;
 
 	case INPUT_KEY_C:
-		/* Quadruple tap (400ms delayed): toggle GPS */
+		/* Toggle GPS */
 		action_gps_toggle();
 		break;
 
 	case INPUT_KEY_E:
-		/* Quintuple tap (immediate): toggle LED heartbeat */
-		action_leds_toggle();
+		/* Flood advert (last tap-codes entry, so immediate) */
+		action_flood_advert();
 		break;
 
 	/* ===== Longpress output ===== */
@@ -773,7 +820,7 @@ void ui_notify(enum ui_event event)
 		is_msg_event = true;
 #ifdef CONFIG_ZEPHCORE_UI_BUZZER
 		/* Only buzz if no phone is connected to receive the message */
-		if (!get_state()->ble_connected) {
+		if (!get_state()->app_connected) {
 			buzzer_play(MELODY_MSG_CONTACT);
 		}
 #endif
@@ -782,7 +829,7 @@ void ui_notify(enum ui_event event)
 	case UI_EVENT_CHANNEL_MSG:
 		is_msg_event = true;
 #ifdef CONFIG_ZEPHCORE_UI_BUZZER
-		if (!get_state()->ble_connected) {
+		if (!get_state()->app_connected) {
 			buzzer_play(MELODY_MSG_CHANNEL);
 		}
 #endif
@@ -791,7 +838,7 @@ void ui_notify(enum ui_event event)
 	case UI_EVENT_ROOM_MSG:
 		is_msg_event = true;
 #ifdef CONFIG_ZEPHCORE_UI_BUZZER
-		if (!get_state()->ble_connected) {
+		if (!get_state()->app_connected) {
 			buzzer_play(MELODY_MSG_CHANNEL);
 		}
 #endif
@@ -803,23 +850,23 @@ void ui_notify(enum ui_event event)
 #endif
 		break;
 
-	case UI_EVENT_BLE_CONNECTED:
-		ui_set_ble_status(true, NULL);
+	case UI_EVENT_APP_CONNECTED:
+		set_app_connected(true);
 		break;
 
-	case UI_EVENT_BLE_DISCONNECTED:
-		ui_set_ble_status(false, NULL);
+	case UI_EVENT_APP_DISCONNECTED:
+		set_app_connected(false);
 		break;
 
 	default:
 		break;
 	}
 
-	if (is_msg_event && !get_state()->ble_connected) {
+	if (is_msg_event && !get_state()->app_connected) {
 		ui_led_flash_msg();
 	}
 
-	/* Wake display on non-message notifications (BLE connect/disconnect etc).
+	/* Wake display on non-message notifications (app connect/disconnect etc).
 	 * Message notifications use buzzer + LED flash instead of waking the display. */
 #ifdef CONFIG_ZEPHCORE_UI_DISPLAY
 #ifndef ZEPHCORE_REPEATER
@@ -864,15 +911,11 @@ void ui_set_msg_count(uint16_t count)
 #endif
 }
 
-void ui_set_ble_status(bool connected, const char *name)
+static void set_app_connected(bool connected)
 {
 	struct ui_state *s = get_state();
 
-	s->ble_connected = connected;
-	if (name) {
-		strncpy(s->device_name, name, sizeof(s->device_name) - 1);
-		s->device_name[sizeof(s->device_name) - 1] = '\0';
-	}
+	s->app_connected = connected;
 
 	if (ui_initialized) {
 		schedule_render();
@@ -900,30 +943,18 @@ void ui_set_radio_params(uint32_t freq_hz, uint8_t sf, uint16_t bw_khz_x10,
 	}
 }
 
-void ui_set_radio_runtime(int8_t effective_tx_power, bool apc_enabled,
-			  int8_t apc_reduction, int16_t apc_margin_x10,
-			  uint8_t apc_target_margin, uint8_t sync_word,
+void ui_set_radio_runtime(uint8_t sync_word,
 			  uint16_t preamble_len, bool rx_duty_cycle,
 			  bool radio_ready, bool in_rx, bool tx_active)
 {
 	struct ui_state *s = get_state();
-	bool changed = s->lora_effective_tx_power != effective_tx_power ||
-		       s->lora_apc_enabled != apc_enabled ||
-		       s->lora_apc_reduction != apc_reduction ||
-		       s->lora_apc_margin_x10 != apc_margin_x10 ||
-		       s->lora_apc_target_margin != apc_target_margin ||
-		       s->lora_sync_word != sync_word ||
+	bool changed = s->lora_sync_word != sync_word ||
 		       s->lora_preamble_len != preamble_len ||
 		       s->lora_rx_duty_cycle != rx_duty_cycle ||
 		       s->lora_radio_ready != radio_ready ||
 		       s->lora_in_rx != in_rx ||
 		       s->lora_tx_active != tx_active;
 
-	s->lora_effective_tx_power = effective_tx_power;
-	s->lora_apc_enabled = apc_enabled;
-	s->lora_apc_reduction = apc_reduction;
-	s->lora_apc_margin_x10 = apc_margin_x10;
-	s->lora_apc_target_margin = apc_target_margin;
 	s->lora_sync_word = sync_word;
 	s->lora_preamble_len = preamble_len;
 	s->lora_rx_duty_cycle = rx_duty_cycle;
@@ -1004,6 +1035,20 @@ void ui_set_clock(uint32_t epoch)
 	}
 }
 
+void ui_set_tz(int16_t minutes)
+{
+	struct ui_state *s = get_state();
+
+	if (s->tz_offset_min == minutes) {
+		return;
+	}
+	s->tz_offset_min = minutes;
+
+	/* EPD only redraws on demand, so a timezone change would otherwise not
+	 * appear until something else forced a repaint. */
+	schedule_render();
+}
+
 void ui_add_recent(const char *name, int16_t rssi, uint32_t age_s)
 {
 	struct ui_state *s = get_state();
@@ -1051,17 +1096,6 @@ void ui_set_node_name(const char *name)
 #endif
 }
 
-void ui_set_sensor_data(int16_t temp_c10, uint32_t pressure_pa,
-			uint16_t humidity_rh10, uint16_t light_lux)
-{
-	struct ui_state *s = get_state();
-
-	s->temperature_c10 = temp_c10;
-	s->pressure_pa = pressure_pa;
-	s->humidity_rh10 = humidity_rh10;
-	s->light_lux = light_lux;
-}
-
 void ui_set_gps_available(bool available)
 {
 	struct ui_state *s = get_state();
@@ -1092,18 +1126,69 @@ void ui_set_ble_enabled(bool enabled)
 	s->ble_enabled = enabled;
 }
 
-void ui_set_buzzer_quiet(bool quiet)
+void ui_set_link_transports(uint8_t mask)
 {
 	struct ui_state *s = get_state();
 
-	s->buzzer_quiet = quiet;
+	if (s->link_transports == mask) {
+		return;
+	}
+	s->link_transports = mask;
+	if (ui_initialized) {
+		schedule_render();
+	}
+}
+
+void ui_set_wifi(uint8_t state, const char *ssid, const char *ip, uint16_t port)
+{
+#if IS_ENABLED(CONFIG_ZEPHCORE_COMPANION_WIFI)
+	struct ui_state *s = get_state();
+	char new_ssid[sizeof(s->wifi_ssid)];
+	char new_ip[sizeof(s->wifi_ip)];
+
+	snprintf(new_ssid, sizeof(new_ssid), "%s", ssid ? ssid : "");
+	snprintf(new_ip, sizeof(new_ip), "%s", ip ? ip : "");
+
+	if (s->wifi_state == state && s->wifi_port == port &&
+	    strcmp(s->wifi_ssid, new_ssid) == 0 && strcmp(s->wifi_ip, new_ip) == 0) {
+		return;
+	}
+	s->wifi_state = state;
+	s->wifi_port = port;
+	memcpy(s->wifi_ssid, new_ssid, sizeof(new_ssid));
+	memcpy(s->wifi_ip, new_ip, sizeof(new_ip));
+
+	/* Repaint only a page that shows it; e-paper included, since this
+	 * changes rarely. */
+#ifdef CONFIG_ZEPHCORE_UI_DISPLAY
+	if (ui_initialized && ui_pages_current() == UI_PAGE_WIFI) {
+		schedule_render();
+	}
+#endif
+#else
+	ARG_UNUSED(state);
+	ARG_UNUSED(ssid);
+	ARG_UNUSED(ip);
+	ARG_UNUSED(port);
+#endif
+}
+
+void ui_set_buzzer_mode(uint8_t mode)
+{
+	struct ui_state *s = get_state();
+
+	s->buzzer_mode = mode;
 }
 
 void ui_set_offgrid_mode(bool enabled)
 {
 	struct ui_state *s = get_state();
+	bool changed = s->offgrid_enabled != enabled;
 
 	s->offgrid_enabled = enabled;
+	if (changed) {
+		schedule_render_auto();
+	}
 }
 
 /* Schedule a redraw for an automatic (non-interactive) state update, e.g. a

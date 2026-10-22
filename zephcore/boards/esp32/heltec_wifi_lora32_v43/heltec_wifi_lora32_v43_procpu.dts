@@ -8,8 +8,8 @@
  *   OLED:   SSD1306 128x64 on I2C0
  *   Button: GPIO0
  *   LED:    GPIO35 (PWM via LEDC0)
- *   Vext:   GPIO36 active-HIGH (powers OLED and sensors)
- *   BatADC: GPIO1 (ADC1 ch0), enable GPIO37 active-LOW
+ *   Vext:   GPIO36 active-LOW PMOS rail switch (powers OLED and sensors)
+ *   BatADC: GPIO1 = ADC1_CH0 (&adc0), enable GPIO37 active-HIGH (vbat_enable in overlay)
  *
  * V4.3 vs V4.2 difference — FEM chip changed:
  *   V4.2: GC1109 PA  — TX_EN on GPIO46 (CPS)
@@ -30,11 +30,13 @@
 
 /dts-v1/;
 
-#include <espressif/esp32s3/esp32s3_wroom_n16r2.dtsi>
+#include <espressif/esp32s3/esp32s3.dtsi>
 #include "heltec_wifi_lora32_v43-pinctrl.dtsi"
 #include <zephyr/dt-bindings/pwm/pwm.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/dt-bindings/lora/sx126x.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/gpio/espressif-esp32-gpio.h>
 #include <espressif/partitions_0x0_amp_16M.dtsi>
 
 / {
@@ -45,6 +47,13 @@
 		led0 = &led0;
 		pwm-0 = &ledc0;
 		pwm-led0 = &pwm_led_white;
+		/* Single physical LED, shared between the heartbeat and LoRa TX
+		 * activity roles (same node aliased twice), same pattern as T096 and
+		 * Wireless Tracker V2 -- see helpers/ui/ui_common.c and
+		 * adapters/board/ZephyrBoard.cpp (ZEPHCORE_LED_PIN_SHARED covers the
+		 * arbitration between the two roles automatically). */
+		heartbeat-pwm-led = &pwm_led_white;
+		lora-tx-pwm-led = &pwm_led_white;
 		uart-0 = &uart0;
 		i2c-0 = &i2c0;
 		lora0 = &lora0;
@@ -77,38 +86,38 @@
 		};
 	};
 
-	vbatt {
-		compatible = "voltage-divider";
-		io-channels = <&adc1 0>;  /* GPIO1 = ADC1 ch0 */
-		output-ohms = <100000>;
-		full-ohms = <(100000 + 390000)>;
-	};
+	/* No 'vbatt' voltage-divider node: ZephCore reads the battery via
+	 * zephyr,user { io-channels } (see board.overlay), and a voltage-divider
+	 * on &adc1 ch0 would target GPIO11 = the SX1262 MISO. See &adc0 below. */
 
-	/* Vext — powers OLED and external peripherals (active-HIGH on GPIO36).
-	 * regulator-fixed + SSD1306 vin-supply: powers rail at boot without relying on
-	 * power-domains (CONFIG_PM_DEVICE is disabled in prj.conf). */
+	/* Vext rail switch — PMOS, ACTIVE LOW (GPIO36 low = rail ON).
+	 * Powers the OLED (incl. its I2C pull-ups) and the expansion header.
+	 * Same rail circuit as V4.2 (only the PA differs on V4.3); verified on V4
+	 * hardware that GPIO36 high leaves the rail floating (~1.6 V) and the OLED
+	 * unpowered, while low gives a clean 3.3 V. Confirmed against Arduino
+	 * MeshCore: RefCountedDigitalPin::begin() drives PIN_VEXT_EN to !active
+	 * (LOW) and the V4 OLED build constructs the display with NULL periph_power,
+	 * so GPIO36 is held LOW continuously there too.
+	 * regulator-boot-on + always-on: the rail comes up at regulator init,
+	 * well before the SSD1306 driver init. */
 	vext_enable: vext-enable {
 		compatible = "regulator-fixed";
 		regulator-name = "vext";
-		enable-gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;  /* GPIO36 = gpio1 pin 4 */
+		enable-gpios = <&gpio1 4 (GPIO_ACTIVE_LOW | ESP32_GPIO_SLEEP_HOLD_EN)>;  /* GPIO36 = gpio1 pin 4 */
 		regulator-boot-on;
 		regulator-always-on;
 	};
 
-	/* ADC enable — GPIO37 (gpio1 pin 5) must be driven HIGH to read battery */
-	adc_ctrl: adc_ctrl {
-		compatible = "power-domain-gpio";
-		enable-gpios = <&gpio1 5 GPIO_ACTIVE_LOW>;   /* GPIO37 = gpio1 pin 5, active-LOW */
-		#power-domain-cells = <0>;
-		label = "ADC Control";
-	};
+	/* No adc_ctrl power-domain node: it would claim GPIO37 (gpio1 pin 5) with
+	 * the opposite polarity and fight the vbat_enable regulator in board.overlay,
+	 * which is the actual per-read driver for the ADC divider enable. */
 
 	/* FEM LDO power supply — GPIO7 powers the KCT8103L LDO.
 	 * Must be HIGH before any radio operation. Keep always-on. */
 	fem_power: fem-power {
 		compatible = "regulator-fixed";
 		regulator-name = "fem-power";
-		enable-gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;  /* VFEM_Ctrl = GPIO7 */
+		enable-gpios = <&gpio0 7 (GPIO_ACTIVE_HIGH | ESP32_GPIO_SLEEP_HOLD_EN)>;  /* VFEM_Ctrl = GPIO7, held across light sleep */
 		regulator-boot-on;
 		regulator-always-on;
 	};
@@ -124,8 +133,30 @@
 	};
 };
 
-&adc1 {
+/* Battery ADC on adc0 (ADC unit 1 -> GPIO1 = ADC1_CH0). The node *labelled*
+ * adc0 is unit 1; the node labelled adc1 is unit 2 (= GPIO11 = SX1262 MISO).
+ * The channel@0 config is required — without it adc_channel_setup_dt() fails and
+ * getBattMilliVolts() returns 0 before ever performing a conversion. ADC_GAIN_1
+ * (0 dB) with ADC_REF_INTERNAL (~1100 mV); the 100K/390K divider output for a
+ * 3.0-4.2 V cell sits well inside range. */
+&adc0 {
 	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+};
+
+/* ADC unit 2 (label adc1) is unused; keep it disabled so nothing can claim
+ * GPIO11 (SX1262 MISO) as an ADC pad. */
+&adc1 {
+	status = "disabled";
 };
 
 &uart0 {
@@ -144,14 +175,6 @@
 };
 
 /* Reduce CPU clock from 240 MHz to 160 MHz — saves power, HAL minimum */
-&cpu0 {
-	clock-frequency = <DT_FREQ_M(160)>;
-};
-
-&cpu1 {
-	clock-frequency = <DT_FREQ_M(160)>;
-};
-
 &ledc0 {
 	pinctrl-0 = <&ledc0_default>;
 	pinctrl-names = "default";
@@ -196,25 +219,56 @@
 	pinctrl-0 = <&spim2_default>;
 	pinctrl-names = "default";
 
-	cs-gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;  /* NSS = GPIO8 */
+	/* NSS held across light sleep (boards/common/pm_esp32.overlay): an
+	 * isolated, floating chip-select lets the sleeping SX1262 clock garbage
+	 * into its retention RAM.  Inert when CONFIG_PM=n. */
+	cs-gpios = <&gpio0 8 (GPIO_ACTIVE_LOW | ESP32_GPIO_SLEEP_HOLD_EN)>;  /* NSS = GPIO8 */
 
 	lora0: modem@0 {
 		compatible = "semtech,sx1262";
 		reg = <0>;
-		reset-gpios   = <&gpio0 12 (GPIO_OPEN_DRAIN | GPIO_ACTIVE_LOW)>;  /* RESET = GPIO12 */
+		reset-gpios   = <&gpio0 12 (GPIO_OPEN_DRAIN | GPIO_ACTIVE_LOW |
+					 ESP32_GPIO_SLEEP_HOLD_EN)>;  /* RESET = GPIO12 */
 		busy-gpios    = <&gpio0 13 GPIO_ACTIVE_HIGH>;                      /* BUSY  = GPIO13 */
 		dio1-gpios    = <&gpio0 14 GPIO_ACTIVE_HIGH>;                      /* DIO1  = GPIO14 */
 
 		/* External PA/FEM control (KCT8103L, V4.3):
 		 *   GPIO2 = CSD (chip enable): driven HIGH during radio, LOW in sleep
-		 *   GPIO5 = CTX (TX/RX select): HIGH during TX, LOW during RX/LNA
-		 * V4.3 CHANGE: CTX moved from GPIO46 (GC1109 CPS) to GPIO5 (KCT8103L CTX). */
-		antenna-enable-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;        /* KCT8103L CSD = GPIO2 */
-		tx-enable-gpios      = <&gpio0 5 GPIO_ACTIVE_HIGH>;        /* KCT8103L CTX = GPIO5 */
+		 *   GPIO5 = CTX (receive-path select): LOW = through the LNA,
+		 *           HIGH = bypass.  Held HIGH during TX, where the branch
+		 *           is inert because DIO2/CPS has selected the TX path.
+		 * V4.3 CHANGE: CTX moved from GPIO46 (GC1109 CPS) to GPIO5 (KCT8103L CTX).
+		 * CTX is lna-bypass-gpios, NOT tx-enable-gpios: it enables nothing,
+		 * and binding it as a TX enable is what made `set radio.fem.rxgain
+		 * off` gate CSD instead in 1.17.2, shutting the FEM down and taking
+		 * the receive path with it (~69 dB, measured). */
+		/*
+		 * ESP32_GPIO_SLEEP_HOLD_EN on both: light sleep switches every pad
+		 * that is not held to an isolated sleep configuration (input and
+		 * output off, no pulls), so these lines float for the length of
+		 * each sleep (boards/common/pm_esp32.overlay).  They are the FEM's
+		 * entire control surface — CSD low disables the PA and the LNA with
+		 * it, CTX high bypasses the LNA — and the radio keeps receiving
+		 * through the sleep, so a floating pair means RX without its LNA
+		 * and TX through a bypassed PA, tens of dB down, while the node
+		 * otherwise looks healthy and keeps relaying.
+		 * The flag is ignored when CONFIG_PM=n, so this is inert on
+		 * builds that never light-sleep.
+		 */
+		antenna-enable-gpios = <&gpio0 2 (GPIO_ACTIVE_HIGH |
+						 ESP32_GPIO_SLEEP_HOLD_EN)>;   /* KCT8103L CSD = GPIO2 */
+		lna-bypass-gpios     = <&gpio0 5 (GPIO_ACTIVE_HIGH |
+						 ESP32_GPIO_SLEEP_HOLD_EN)>;   /* KCT8103L CTX = GPIO5 */
 
-		/* DIO2 drives the SX1262 internal RF switch (TX path select).
-		 * Combined with tx-enable-gpios, this keeps both the internal and
-		 * external PA switch in sync with no software intervention needed. */
+		/* DIO2 drives the SX1262 RF switch output, which on a KCT8103L
+		 * board is the part's CPS pin — the TX/RX path select. MeshCore's
+		 * heltec_v4 target defines CSD=2 and CTX=5 for the KCT8103L, no
+		 * CPS GPIO, and SX126X_DIO2_AS_RF_SWITCH=true; same on t096 and
+		 * tracker_v2. Note the V4.2 GC1109 inverts these two pin names —
+		 * there CPS is GPIO46 (an MCU pin, see heltec_wifi_lora32_v4) and
+		 * DIO2 drives the pin that part calls CTX. On the KCT8103L, DIO2
+		 * doing the path select is what leaves CTX free to mean nothing
+		 * but LNA-or-bypass. */
 		dio2-tx-enable;
 
 		/* TCXO 1.8V via DIO3 — same as V4.2 */
@@ -235,3 +289,14 @@
 
 &esp32_bt_hci { status = "okay"; };
 &wifi { status = "okay"; };
+
+/* Module flash/PSRAM, declared by the board since Zephyr 4.5 removed the
+ * per-module dtsi (esp32s3_wroom_n16r2.dtsi). */
+&flash0 {
+	reg = <0x0 DT_SIZE_M(16)>;
+	ranges = <0x0 0x0 DT_SIZE_M(16)>;
+};
+
+&psram0 {
+	size = <DT_SIZE_M(2)>;
+};

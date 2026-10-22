@@ -25,6 +25,11 @@ struct gps_position {
 	int64_t timestamp_ms;    /* Timestamp when fix was acquired */
 };
 
+/* gps_state_info.state */
+#define GPS_STATE_INFO_OFF        0
+#define GPS_STATE_INFO_STANDBY    1
+#define GPS_STATE_INFO_ACQUIRING  2
+
 /* GPS state info for UI display */
 struct gps_state_info {
 	uint8_t state;          /* 0=OFF, 1=STANDBY (sleeping), 2=ACQUIRING (searching) */
@@ -33,27 +38,35 @@ struct gps_state_info {
 	uint32_t next_search_s;   /* Seconds until next search (0 = searching now or off) */
 };
 
+/* ===== GPS configuration diagnostics (runtime toggle, RAM only) =====
+ * With diag on, the next GPS enable re-runs the module configuration and
+ * records the outcome for `get gps diag`. Not persisted. */
+void gps_set_diag(bool on);
+
+/* Render the last configuration attempt as a single CLI line. Always
+ * succeeds; reports "never run" if configuration has not happened yet. */
+void gps_get_diag_report(char *buf, size_t len);
+
+/* `gps diag` (upstream's LocationProvider::formatDiagnostics): module on,
+ * NMEA sentences parsed, satellites, fix, fix age in ms, module power-on /
+ * power-off counts. Upstream's UART byte and bad-checksum counters have no
+ * source behind the GNSS API and are left out. */
+void gps_format_diagnostics(char *out, size_t out_size);
+
 /* GPS enable callback - called when GPS is enabled/disabled (for power management) */
 typedef void (*gps_enable_callback_t)(bool enabled);
 void gps_set_enable_callback(gps_enable_callback_t cb);
 
-/* GPS fix callback - called when GPS acquires a validated fix (3 consecutive good fixes)
- * Parameters: latitude (degrees), longitude (degrees), utc_time (Unix timestamp)
- * Use this to update node position for mesh advertising */
+/* GPS fix callback - called when GPS acquires a validated fix (5 consecutive satellite fixes)
+ * Parameters: latitude (degrees), longitude (degrees), utc_time (Unix timestamp,
+ * 0 if the fix carried no usable date). Runs on the main thread, from
+ * gps_process_event(), so it may set the clock and prefs directly. */
 typedef void (*gps_fix_callback_t)(double lat, double lon, int64_t utc_time);
 void gps_set_fix_callback(gps_fix_callback_t cb);
 
-/* GPS event callback - called when the GPS state machine needs the main thread
- * to process a state transition (wake from standby, timeout, etc.).
- *
- * IMPORTANT: GNSS drivers use modem_chat_run_script() which blocks on a
- * semaphore signaled from the system work queue. GPS timer work items also
- * run on the system work queue → calling blocking GNSS APIs from a timer
- * work handler deadlocks the system work queue.
- *
- * Solution: timer work handlers signal this callback, which posts an event
- * to the main mesh thread. The main thread then calls gps_process_event()
- * which safely executes the blocking GNSS configuration. */
+/* GPS event callback: the state machine needs the main thread. Timer work
+ * handlers must not call blocking GNSS APIs (they would deadlock the system
+ * work queue), so they signal here and main calls gps_process_event(). */
 typedef void (*gps_event_callback_t)(void);
 void gps_set_event_callback(gps_event_callback_t cb);
 
@@ -66,7 +79,8 @@ void gps_process_event(void);
 /* Initialize GPS manager (call once at boot) */
 int gps_manager_init(void);
 
-/* GPS functions */
+/* GPS functions. Available: the GNSS device came up and, once the first acquire
+ * window since boot has run its probe, the module sent NMEA. */
 bool gps_is_available(void);
 bool gps_is_enabled(void);
 void gps_enable(bool enable);
@@ -78,6 +92,11 @@ void gps_ensure_power_state(bool should_be_enabled);
 void gps_get_position(struct gps_position *pos);
 uint32_t gps_get_poll_interval_sec(void);
 void gps_set_poll_interval_sec(uint32_t interval);
+/* Every board: duty intervals up to this many seconds keep the module's state
+ * between fixes (backup sleep, standby pin, VRTC: a fast fix on wake), longer
+ * ones take the board's full power-off. 0 = always the full power-off. Takes
+ * effect at the next standby. */
+void gps_set_standby_max_sec(uint32_t sec);
 
 /* Get RTC time from GPS (returns Unix timestamp, 0 if no valid time) */
 int64_t gps_get_utc_time(void);
@@ -104,14 +123,16 @@ void gps_get_state_info(struct gps_state_info *info);
  * current while nRF52840 is in System OFF (GPIO latches persist). */
 void gps_power_off_for_shutdown(void);
 
-/* Set repeater mode for GPS - time sync only, minimal power usage.
- * In repeater mode:
- * - GPS starts powered OFF
- * - Wakes every 48 hours for RTC time sync
- * - 5 minute timeout to acquire fix
- * - Powers off after fix or timeout
- * Call this at boot for repeater role before any gps_enable() calls. */
+/* Set repeater (time-sync) mode: every acquire window is the fixed 5-minute
+ * one, then standby for the poll interval (a server's default is
+ * CONFIG_ZEPHCORE_REPEATER_GPS_INTERVAL_SEC). Mode only: it does not power the
+ * GPS; gps_enable() does. Call at boot before any gps_enable(). */
 void gps_set_repeater_mode(bool repeater);
+
+/* For a role that never uses its GPS (the observer), instead of
+ * gps_manager_init(): power the module down and release its UART, which would
+ * otherwise stay powered and armed for the whole uptime. */
+void gps_park(void);
 
 #ifdef __cplusplus
 }

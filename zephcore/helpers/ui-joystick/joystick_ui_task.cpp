@@ -10,6 +10,8 @@
 #include "joystick_ui_task.h"
 #include "joystick_defs.h"
 #include "joystick_ui_hooks.h"
+#include <helpers/input/zephcore_input_ascii.h>
+#include <helpers/buzzer_gate.h>
 #include <helpers/ui/ui_mesh_actions.h>
 #include <helpers/ui/ui_task.h>
 #include <helpers/AdvertDataHelpers.h>
@@ -21,9 +23,7 @@
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/drivers/display.h>
-#ifdef CONFIG_POWEROFF
-#include <zephyr/sys/poweroff.h>
-#endif
+#include <zephyr_poweroff.h>
 #include <zephyr/random/random.h>
 #include <zephyr/logging/log.h>
 
@@ -356,14 +356,23 @@ static void joystick_ui_input_cb(struct input_event *evt, void *user_data)
 		return;
 	}
 
+	/* Apply the joystick axis flip once, here, so every path below — the
+	 * long-press timers keyed on UP/DOWN included — sees the direction the
+	 * user physically pushed on an upside-down mount.
+	 *
+	 * Mapped into a local rather than written back into the event: the input
+	 * event is shared with every other INPUT_CALLBACK_DEFINE consumer on the
+	 * bus, and this remap is a UI-layer convention, not a hardware fact. */
+	const uint16_t code = zephcore_input_map_code(evt->code);
+
 #ifdef CONFIG_ZEPHCORE_EASTER_EGG_DOOM
 	/* When Doom is running, forward all events to it.
 	 * BACK/ESC/KEY_1 release also enqueues KEY_CANCEL so DoomScreen can stop it. */
 	if (doom_game_is_running()) {
-		doom_game_input(evt->code, evt->value);
+		doom_game_input(code, evt->value);
 		if (!evt->value &&
-			(evt->code == INPUT_KEY_BACK || evt->code == INPUT_KEY_ESC ||
-			 evt->code == INPUT_KEY_1)) {
+			(code == INPUT_KEY_BACK || code == INPUT_KEY_ESC ||
+			 code == INPUT_KEY_1)) {
 			if (joystick_queue_initialized) {
 				JoystickUITask::enqueueKey(KEY_CANCEL);
 			}
@@ -372,8 +381,34 @@ static void joystick_ui_input_cb(struct input_event *evt, void *user_data)
 	}
 #endif
 
+	/* Screen-lock combo: user button (INPUT_KEY_0) + joystick center
+	 * (INPUT_KEY_ENTER) held simultaneously. Tracked on raw press/release,
+	 * which are visible here on the global input bus before the per-key
+	 * handling below (INPUT_KEY_0 is otherwise only consumed by the
+	 * longpress/multi-tap filters). Latched so it fires once per combo
+	 * until at least one of the two is released; the stray key events the
+	 * two buttons emit afterwards land in the locked handler harmlessly. */
+	static bool s_userbtn_down;
+	static bool s_center_down;
+	static bool s_lock_combo_latched;
+	if (code == INPUT_KEY_0) {
+		s_userbtn_down = (evt->value != 0);
+	} else if (code == INPUT_KEY_ENTER) {
+		s_center_down = (evt->value != 0);
+	}
+	if (s_userbtn_down && s_center_down) {
+		if (!s_lock_combo_latched) {
+			s_lock_combo_latched = true;
+			if (joystick_queue_initialized) {
+				JoystickUITask::enqueueKey(KEY_LOCK);
+			}
+		}
+	} else {
+		s_lock_combo_latched = false;
+	}
+
 	/* Long press fires on RELEASE so hold duration is known */
-	if (evt->code == INPUT_KEY_ENTER) {
+	if (code == INPUT_KEY_ENTER) {
 		if (evt->value) {
 			s_enter_press_ms = k_uptime_get_32();
 		} else {
@@ -385,7 +420,7 @@ static void joystick_ui_input_cb(struct input_event *evt, void *user_data)
 		}
 		return;
 	}
-	if (evt->code == INPUT_KEY_UP) {
+	if (code == INPUT_KEY_UP) {
 		if (evt->value) {
 			s_up_press_ms = k_uptime_get_32();
 		} else {
@@ -397,7 +432,7 @@ static void joystick_ui_input_cb(struct input_event *evt, void *user_data)
 		}
 		return;
 	}
-	if (evt->code == INPUT_KEY_DOWN) {
+	if (code == INPUT_KEY_DOWN) {
 		if (evt->value) {
 			s_down_press_ms = k_uptime_get_32();
 		} else {
@@ -413,17 +448,38 @@ static void joystick_ui_input_cb(struct input_event *evt, void *user_data)
 	/* All other keys: fire on press, ignore release */
 	if (!evt->value) return;
 
+	/* A keypad reports typed characters offset above the INPUT_KEY_* code
+	 * space (zephcore_input_ascii.h). Unwrap to plain ASCII, which is what
+	 * the key-space contract in joystick_defs.h reserves 0x20-0x7E for.
+	 *
+	 * Testing the raw event code against 0x20-0x7E instead would be wrong:
+	 * INPUT_KEY_LEFT is 105 and INPUT_KEY_RIGHT is 106, so joystick boards
+	 * would see their arrows turn into the letters 'i' and 'j'. */
+	if (ZEPHCORE_INPUT_IS_ASCII(code)) {
+		if (joystick_queue_initialized) {
+			JoystickUITask::enqueueKey(ZEPHCORE_INPUT_TO_ASCII(code));
+		}
+		return;
+	}
+
 	char key = 0;
-	switch (evt->code) {
+	switch (code) {
 	case INPUT_KEY_LEFT:    key = KEY_LEFT;         break;
 	case INPUT_KEY_RIGHT:   key = KEY_RIGHT;        break;
 	case INPUT_KEY_BACK:
 	case INPUT_KEY_ESC:     key = KEY_CANCEL;       break;
 	case INPUT_KEY_1:       key = KEY_CANCEL;       break;
+	/* Keypad boards (ThinkNode M9) — the only input those have */
+	case INPUT_KEY_HOME:    key = KEY_HOME;         break;
+	case INPUT_KEY_MENU:    key = KEY_SELECT;       break;
+	case INPUT_KEY_PAGEUP:  key = KEY_PREV;         break;
+	case INPUT_KEY_PAGEDOWN:key = KEY_NEXT;         break;
+	case INPUT_KEY_F2:      key = KEY_ENTER_LONG;   break;
 	/* Multi tap outputs from input_multi_tap filter */
+	case INPUT_KEY_B:       key = KEY_LED_TOGGLE;   break;  /* 2 taps */
 	case INPUT_KEY_D:       key = KEY_BUZZ_TOGGLE;  break;  /* 3 taps */
 	case INPUT_KEY_C:       key = KEY_GPS_TOGGLE;   break;  /* 4 taps */
-	case INPUT_KEY_E:       key = KEY_LED_TOGGLE;   break;  /* 5 taps */
+	case INPUT_KEY_E:       key = KEY_FLOOD_ADVERT; break;  /* 5 taps */
 	default: break;
 	}
 
@@ -456,7 +512,7 @@ JoystickUITask::JoystickUITask()
 	  _next_refresh(0), _last_blt_ms(0), _pending_render(false), _render_immediate(false),
 	  _screen_off_ms(AUTO_OFF_MILLIS), _was_display_on(false),
 	  _cached_batt_mv(0), _battery_display_mode(0),
-	  _brightness(100), _wake_on_msg(true), _ble_connected(false),
+	  _brightness(100), _wake_on_msg(true), _app_connected(false),
 	  _ble_enabled(true), _noise_floor(-120),
 	  _pkt_recv(0), _pkt_sent(0), _pkt_errors(0), _alert_expiry(0),
 	  _locked(false), _lock_step(0),
@@ -540,6 +596,9 @@ void JoystickUITask::begin(BaseChatMesh *mesh, mesh::ZephyrRTCClock *rtc, NodePr
 	_rename_node = new RenameNodeScreen(this);
 	_ble_code = new BLECodeScreen(this);
 	_stats = new StatsScreen(this);
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+	_wifi = new WifiScreen(this);
+#endif
 	_stopwatch = new StopwatchScreen(this);
 	_countdown = new CountdownScreen(this);
 	_snake = new SnakeScreen(this);
@@ -590,6 +649,17 @@ void JoystickUITask::gotoT9InputScreenWithPrefix(const char *prefix)
 void JoystickUITask::gotoRenameNodeScreen()   { setCurrScreen(_rename_node); }
 void JoystickUITask::gotoBLECodeScreen()      { setCurrScreen(_ble_code); }
 void JoystickUITask::gotoStatsScreen()        { setCurrScreen(_stats); }
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+void JoystickUITask::gotoWifiScreen()         { setCurrScreen(_wifi); }
+
+void JoystickUITask::setWifi(uint8_t state, const char *ssid, const char *ip, uint16_t port)
+{
+	_wifi_state = state;
+	_wifi_port = port;
+	snprintf(_wifi_ssid, sizeof(_wifi_ssid), "%s", ssid ? ssid : "");
+	snprintf(_wifi_ip, sizeof(_wifi_ip), "%s", ip ? ip : "");
+}
+#endif
 void JoystickUITask::gotoStopwatchScreen()    { setCurrScreen(_stopwatch); }
 void JoystickUITask::gotoCountdownScreen()    { setCurrScreen(_countdown); }
 void JoystickUITask::gotoSnakeScreen()        { setCurrScreen(_snake); }
@@ -714,10 +784,7 @@ void JoystickUITask::renderLockOverlay()
 	 * doesn't burn power). */
 	char batt_buf[16];
 	if (_cached_batt_mv > 0) {
-		int pct = ((int)_cached_batt_mv - kBattMinMv) * 100 / (kBattMaxMv - kBattMinMv);
-		if (pct < 0) pct = 0;
-		if (pct > 100) pct = 100;
-		snprintf(batt_buf, sizeof(batt_buf), "Batt: %d%%", pct);
+		snprintf(batt_buf, sizeof(batt_buf), "Batt: %u%%", _cached_batt_pct);
 	} else {
 		snprintf(batt_buf, sizeof(batt_buf), "Batt: --");
 	}
@@ -809,16 +876,39 @@ void JoystickUITask::loop()
 			continue;
 		}
 
+		if (key == KEY_LOCK) {
+			/* Manual lock combo — engage now and stop the idle timer
+			 * (unlock reschedules it). Same locked state the idle
+			 * lockTimerCb would set. */
+			_locked = true;
+			_lock_step = 0;
+			k_timer_stop(&_lock_timer);
+			_render_immediate = true;
+			_pending_render = true;
+			continue;
+		}
+
 		scheduleLockTimer();
 		bool consumed = false;
 		if (key == KEY_BUZZ_TOGGLE) {
 			toggleBuzzer();
+			showAlert(isBuzzerQuiet() ? "Buzzer off" : "Buzzer on", 1000);
 			consumed = true;
 		} else if (key == KEY_GPS_TOGGLE) {
 			toggleGPS();
 			consumed = true;
 		} else if (key == KEY_LED_TOGGLE) {
 			toggleLeds();
+			showAlert(isLedsDisabled() ? "LEDs: OFF" : "LEDs: ON", 1000);
+			consumed = true;
+		} else if (key == KEY_FLOOD_ADVERT) {
+			/* Canonical scoped path: honors prefs.path_hash_mode and the
+			 * default transport scope (same as the Advert menu item). */
+			if (_mesh && _mesh->sendSelfAdvert(true)) {
+				showAlert("Advert flood sent", 1000);
+			} else {
+				showAlert("Advert failed", 1000);
+			}
 			consumed = true;
 		}
 		if (!consumed && _curr) {
@@ -849,6 +939,13 @@ void JoystickUITask::loop()
 
 #ifdef CONFIG_ZEPHCORE_EASTER_EGG_DOOM
 	if (doom_game_is_running()) {
+		/* The game takes the joystick straight from the input callback, so
+		 * no key reaches the paths that normally keep these alive: the UI
+		 * locked itself mid-game and the exit key then went to the lock
+		 * screen (and an auto-off swallowed it as a wake press). Playing is
+		 * activity. */
+		scheduleLockTimer();
+		mc_display_reset_auto_off();
 		_next_refresh = now + 500;
 		if (s_schedule_render_fn) s_schedule_render_fn(500);
 		return;
@@ -888,15 +985,16 @@ bool JoystickUITask::isBuzzerQuiet() const
 void JoystickUITask::toggleBuzzer()
 {
 #ifdef CONFIG_ZEPHCORE_UI_BUZZER
-	bool was_quiet = buzzer_is_quiet();
-	if (was_quiet) {
-		buzzer_set_quiet(false);
+	uint8_t mode = zephcore_buzzer_next_mode(zephcore_buzzer_mode());
+
+	if (zephcore_buzzer_mode_audible(mode)) {
+		zephcore_buzzer_set_mode(mode, false);
 		buzzer_play("bon:d=16,o=7,b=200:c,p,c,p,c,p,p,8e");
 	} else {
 		buzzer_play("bof:d=16,o=7,b=200:c,p,c,p,c,p,p,8g5");
-		buzzer_set_quiet_deferred(true);
+		zephcore_buzzer_set_mode(mode, true);
 	}
-	mesh_set_buzzer_quiet(!was_quiet);
+	mesh_set_buzzer_mode(mode);
 #endif
 }
 
@@ -912,8 +1010,15 @@ bool JoystickUITask::getGPSState() const
 
 void JoystickUITask::toggleGPS()
 {
-	if (!gps_is_available()) return;
-	mesh_gps_set_enabled(!gps_is_enabled());
+	if (!gps_is_available()) {
+		showAlert("No GPS", 1000);
+		return;
+	}
+	/* The mesh loop applies the change later, so getGPSState() is still
+	 * the old state here: the alert names the requested one. */
+	bool enable = !gps_is_enabled();
+	mesh_gps_set_enabled(enable);
+	showAlert(enable ? "GPS enabled" : "GPS disabled", 1000);
 }
 
 uint32_t JoystickUITask::getGpsDutySec() const
@@ -959,7 +1064,7 @@ void JoystickUITask::disableSerial() { _ble_enabled = false; mesh_ble_set_enable
 /* ===== Offgrid / LEDs / DFU ===== */
 void JoystickUITask::setOffgridMode(bool enable)
 {
-	if (_prefs) _prefs->client_repeat = enable ? 1 : 0;
+	/* CompanionMesh::setOffgridMode() does the prefs and the retune. */
 	mesh_set_offgrid_mode(enable);
 }
 
@@ -967,7 +1072,11 @@ void JoystickUITask::toggleLeds()
 {
 	bool new_disabled = !isLedsDisabled();
 	if (_prefs) _prefs->leds_disabled = new_disabled ? 1 : 0;
-	ui_set_heartbeat_led(!new_disabled);
+	/* ui_set_leds_disabled (not ui_set_heartbeat_led): it owns the
+	 * s_leds_disabled gate in ui_common.c. Calling only the heartbeat
+	 * helper left that gate at its boot value, so a node booted with
+	 * leds_disabled=1 could never re-enable its LEDs from the UI. */
+	ui_set_leds_disabled(new_disabled);
 	mesh_set_leds_disabled(new_disabled);
 }
 
@@ -1033,24 +1142,56 @@ void JoystickUITask::toggleWakeOnMsg()
 	mesh_set_wake_on_msg(_wake_on_msg);
 }
 
+bool JoystickUITask::getDisplayRotate() const
+{
+	return mc_display_is_rotated();
+}
+
+bool JoystickUITask::toggleDisplayRotate()
+{
+	bool want = !mc_display_is_rotated();
+
+	/* Only persist what the panel actually did.  Saving a rotation the
+	 * hardware refused would come back at the next boot and be refused
+	 * again, leaving the menu showing a state the screen never entered. */
+	if (mc_display_set_rotated(want) != 0) {
+		return false;
+	}
+	mesh_save_display_rotate(want);
+	return true;
+}
+
+bool JoystickUITask::getInputRotate() const
+{
+	return zephcore_input_is_flipped();
+}
+
+void JoystickUITask::toggleInputRotate()
+{
+	bool want = !zephcore_input_is_flipped();
+
+	zephcore_input_set_flipped(want);
+	mesh_save_input_rotate(want);
+}
+
 /* ===== Notifications from mesh ===== */
 void JoystickUITask::newMsg(uint8_t path_len, const char *from_name, const char *text, int msgcount)
 {
 	(void)msgcount;  /* tracked by CompanionMesh */
 	if (_unread) {
-		/* When BLE phone is connected it pulls offline queue and marks read;
-		 * keep the message in our local history but don't count as unread. */
+		/* A connected app (any transport) pulls the offline queue and marks it
+		 * read; keep the message in our local history but don't count as unread. */
 		_unread->addPreview(path_len, from_name, text,
-				/*initially_read=*/_ble_connected);
+				/*initially_read=*/_app_connected);
 	}
-	/* Wake display if wake on msg is enabled and no BLE peer is connected.
+	/* Wake display if wake on msg is enabled and no app is connected.
 	 * mc_display_on() already reschedules display.c's auto-off timer. */
-	if (_wake_on_msg && !_ble_connected && !_display.isOn()) {
+	if (_wake_on_msg && !_app_connected && !_display.isOn()) {
 		_display.turnOn();
 	}
 	_next_refresh = 0;
 #ifdef CONFIG_ZEPHCORE_UI_BUZZER
-	if (!_ble_connected) {
+	if (!_app_connected) {
 		buzzer_play("MsgRcv3:d=4,o=6,b=200:32e,32g,32b,16c7");
 	}
 #endif
@@ -1074,16 +1215,16 @@ void JoystickUITask::newChannelMsg(const char *channel_name, const char *text,
 	if (_unread) {
 		char ch_from[48];
 		snprintf(ch_from, sizeof(ch_from), "#%s", channel_name ? channel_name : "?");
-		/* BLE-connected → phone reads via offline queue, don't count as unread. */
+		/* App connected → it reads via the offline queue, don't count as unread. */
 		_unread->addPreview(path_len, ch_from, text,
-				/*initially_read=*/_ble_connected);
+				/*initially_read=*/_app_connected);
 	}
-	if (_wake_on_msg && !_ble_connected && !_display.isOn()) {
+	if (_wake_on_msg && !_app_connected && !_display.isOn()) {
 		_display.turnOn();  /* display.c reschedules auto-off internally */
 	}
 	_next_refresh = 0;
 #ifdef CONFIG_ZEPHCORE_UI_BUZZER
-	if (!_ble_connected) {
+	if (!_app_connected) {
 		buzzer_play("kerplop:d=16,o=6,b=120:32g#,32c#");
 	}
 #endif
@@ -1214,29 +1355,6 @@ bool JoystickUITask::sendComposedMessage(const char *text)
 	return false;
 }
 
-bool JoystickUITask::sendChannelMessage(const char *text)
-{
-	if (!text || !text[0] || _compose_channel_idx < 0 || !_mesh) return false;
-	ChannelDetails ch;
-	if (!_mesh->getChannel(_compose_channel_idx, ch)) return false;
-	uint32_t ts = _rtc ? _rtc->getCurrentTimeUnique() : k_uptime_get_32();
-	return startPendingChannel((uint8_t)_compose_channel_idx, ch, ts, text);
-}
-
-bool JoystickUITask::findContactByName(const char *name, ContactInfo &contact)
-{
-	if (!name || !_mesh) return false;
-	int n = _mesh->getNumContacts();
-	for (int i = 0; i < n; i++) {
-		ContactInfo c;
-		if (_mesh->getContactByIdx(i, c) && strcmp(c.name, name) == 0) {
-			contact = c;
-			return true;
-		}
-	}
-	return false;
-}
-
 /* ===== RepeaterAdmin callbacks ===== */
 void JoystickUITask::onRepeaterAdminLoginResult(const uint8_t *pub_key_prefix,
 		bool success, uint8_t permissions, uint32_t server_time)
@@ -1326,20 +1444,6 @@ int JoystickUITask::getRecentlyHeard(AdvertPath *dest, int max) const
 {
 	auto *cm = static_cast<CompanionMesh *>(_mesh);
 	return cm ? cm->getRecentlyHeard(dest, max) : 0;
-}
-
-bool JoystickUITask::getDiscoverSignal(const uint8_t *pubkey, int8_t &snr_out,
-		uint8_t *path_len_out) const
-{
-	for (int i = 0; i < DISCOVER_SIGNAL_TABLE_SIZE; i++) {
-		if (_discover_signals[i].valid &&
-			memcmp(_discover_signals[i].pubkey, pubkey, PUB_KEY_SIZE) == 0) {
-			snr_out = _discover_signals[i].snr;
-			if (path_len_out) *path_len_out = _discover_signals[i].path_len;
-			return true;
-		}
-	}
-	return false;
 }
 
 void JoystickUITask::clearDiscoverSignals()
@@ -1438,17 +1542,18 @@ void JoystickUITask::shutdown(bool restart)
 #endif
 
 	if (restart) {
+		zephcore_persist_before_off();
 		_display.turnOff();
 		sys_reboot(SYS_REBOOT_COLD);
 	} else {
 #ifdef CONFIG_POWEROFF
-		/* Full peripheral teardown + SENSE config for sw0 wake.  Shared
-		 * helper turns off display, GPS, regulators, holds LoRa in reset
-		 * and arms the button SENSE so the user can actually wake the
-		 * device. Same code path as the button UI's action_deep_sleep. */
-		ui_prepare_for_system_off();
-		sys_poweroff();
+		/* The one power-off path (adapters/board/zephyr_poweroff.c):
+		 * display, GPS, regulators, LoRa reset, the button SENSE so the
+		 * user can wake the device. Same as the button UI's deep sleep. */
+		zephcore_shutdown_reason_save(ZC_SHUTDOWN_USER);
+		zephcore_power_off();
 #else
+		zephcore_persist_before_off();
 		_display.turnOff();
 		sys_reboot(SYS_REBOOT_COLD);
 #endif

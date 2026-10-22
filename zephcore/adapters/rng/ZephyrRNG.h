@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include <mesh/RNG.h>
+#include <mesh/Utils.h>
 #include <mesh/Identity.h>
 #include <stddef.h>
 
@@ -15,34 +15,32 @@ class ZephyrRNG : public RNG {
 public:
 	void random(uint8_t *dest, size_t sz) override;
 
-	/* Layered entropy mixer for one-time first-boot identity-key
-	 * generation. Combines:
-	 *   1. sys_csrand_get (early)        — CSPRNG, strong on nRF/MG24
-	 *   2. HWINFO unique device ID       — per-device uniqueness
-	 *   3. Optional caller-supplied data — e.g. external noise samples
-	 *   4. CPU cycle-counter jitter      — main entropy source
-	 *                                       (NIST SP 800-90B class)
-	 *   5. sys_csrand_get (late)         — catches mid-boot radio init
-	 *   6. CPU cycle-counter jitter #2   — independent timing window
-	 * Conditioned via AES-256-CTR (SHA-256(pool) → key, ECB on counter).
-	 * NIST-style health checks on jitter samples; reboots on degenerate
-	 * output. Blocks for ~250ms — only called at first-boot identity gen.
-	 *
-	 * Output is suitable as an Ed25519 seed regardless of platform
-	 * TRNG state at boot. */
+	/* Layered entropy mixer for the one-time identity key: CSPRNG draws early and
+	 * late, the device ID, optional caller data and two windows of the two-clock
+	 * beat, conditioned via AES-256-CTR. Health-checked; reboots on degenerate
+	 * output. Blocks ~450 ms. */
 	static void mixIdentitySeed(uint8_t *out, size_t out_len,
 				    const uint8_t *extra = nullptr,
 				    size_t extra_len = 0);
 
-	/* End-to-end first-boot identity generation. Mixes a fresh seed,
-	 * derives the Ed25519 keypair, and retries (up to 100×) if the
-	 * MeshCore protocol-reserved 0x00/0xFF public-key prefix happens
-	 * to land. Panics-and-reboots on cap exhaustion (essentially
-	 * impossible with a working CSPRNG: P(100 reserved in a row) ≈ 10⁻²¹¹).
-	 * Wipes the intermediate seed before return.
-	 *
-	 * Use this from main()'s `loadIdentity` fall-through path instead
-	 * of open-coding the mix+derive+retry+zeroize sequence. */
+#if defined(ZEPHCORE_RNG_TEST_HOOKS)
+	/* TEST ONLY — enabled by a compile define, set only by tools/rng_selftest
+	 * (never by production builds). When active, mixIdentitySeed zeroes the
+	 * HWRNG (sys_csrand_get) contribution to the pool, so a diversity test
+	 * measures the two-clock beat alone. Answers "if the hardware RNG returns
+	 * nothing, does ZephyrRNG still produce diverse keys?" On a single device
+	 * the device-id (stage 2) is constant across runs, so the beat is then the
+	 * ONLY varying source. */
+	static void setTestKillHWRNG(bool kill);
+#endif
+
+	/* Silence mixIdentitySeed's per-stage health report. Default off; for
+	 * tools/rng_selftest only. */
+	static void setSeedHealthQuiet(bool quiet);
+
+	/* First-boot identity generation: mixes a seed, derives the Ed25519 keypair,
+	 * retries (up to 100 times) on a reserved 0x00/0xFF public-key prefix, and
+	 * wipes the seed. */
 	static void generateFirstBootIdentity(LocalIdentity &out_identity);
 };
 

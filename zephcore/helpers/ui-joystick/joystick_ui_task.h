@@ -24,6 +24,7 @@
 #include <helpers/ContactInfo.h>
 #include <helpers/ChannelDetails.h>
 #include <helpers/NodePrefs.h>
+#include <helpers/OffgridPolicy.h>
 #include <adapters/clock/ZephyrRTCClock.h>
 
 #include <zephyr/kernel.h>
@@ -73,6 +74,9 @@ public:
 	void gotoRenameNodeScreen();
 	void gotoBLECodeScreen();
 	void gotoStatsScreen();
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+	void gotoWifiScreen();
+#endif
 	void gotoStopwatchScreen();
 	void gotoCountdownScreen();
 	void gotoSnakeScreen();
@@ -87,6 +91,8 @@ public:
 
 	/* State accessors for screens */
 	uint16_t getCachedBattMilliVolts() const { return _cached_batt_mv; }
+	/* The board's own percentage (discharge curve or fuel gauge). */
+	uint8_t getCachedBattPercent() const { return _cached_batt_pct; }
 	int getBatteryDisplayMode() const { return _battery_display_mode; }
 	void toggleBatteryDisplayMode() { _battery_display_mode = (_battery_display_mode + 1) % 2; }
 	uint32_t getScreenOffMillis() const { return _screen_off_ms; }
@@ -95,6 +101,15 @@ public:
 	void adjustBrightness(int delta);
 	bool getWakeOnMsg() const { return _wake_on_msg; }
 	void toggleWakeOnMsg();
+	/* Physical mounting orientation. Both persist to prefs; kept separate
+	 * because a case can flip the screen without flipping the stick.
+	 * Display rotation is only offered where the panel can do it in hardware
+	 * (MC_DISPLAY_ROTATE_SUPPORTED) — toggleDisplayRotate() is a no-op that
+	 * reports failure elsewhere, so the caller can leave the row out. */
+	bool getDisplayRotate() const;
+	bool toggleDisplayRotate();
+	bool getInputRotate() const;
+	void toggleInputRotate();
 	/* Path-hash-mode: 0/1/2 → 1/2/3 bytes per hop appended to outbound flood
 	 * path. Cycles through the three valid settings; persists to prefs. */
 	uint8_t getPathHashBytes() const { return _prefs ? (uint8_t)(_prefs->path_hash_mode + 1) : 1; }
@@ -103,6 +118,7 @@ public:
 	void toggleBuzzer();
 	bool isGPSAvailable() const;
 	bool getGPSState() const;
+	/* Requests the opposite state and shows the alert for it. */
 	void toggleGPS();
 	/* GPS duty-cycle interval, seconds (0 = always on). Steps through a fixed
 	 * preset ladder (step = +1/-1) rather than raw seconds, since the valid
@@ -113,7 +129,10 @@ public:
 	bool isSerialEnabled() const { return _ble_enabled; }
 	void disableSerial();
 	void enableSerial();
-	bool isOffgridEnabled() const { return _prefs && _prefs->client_repeat != 0; }
+	bool isOffgridEnabled() const { return _prefs && mesh::offgridActive(*_prefs); }
+	/* kHz that turning it on leads to (the current one if already off-grid);
+	 * 0 = no off-grid frequency for this band. */
+	uint32_t offgridTargetKhz() const { return _prefs ? mesh::nearestOffgridFreqKhz(_prefs->freq) : 0; }
 	void setOffgridMode(bool enable);
 	bool isLedsDisabled() const { return _prefs && _prefs->leds_disabled != 0; }
 	void toggleLeds();
@@ -137,11 +156,7 @@ public:
 	void setComposeChannel(int idx, const char *name);
 	void setComposeContact(const ContactInfo &contact);
 	bool sendComposedMessage(const char *text);
-	bool sendChannelMessage(const char *text);
-	bool findContactByName(const char *name, ContactInfo &contact);
 	int getRecentlyHeard(AdvertPath *dest, int max) const;
-	bool getDiscoverSignal(const uint8_t *pubkey, int8_t &snr_out,
-		uint8_t *path_len_out = nullptr) const;
 	void clearDiscoverSignals();
 	int getDiscoverCount() const;
 	bool getDiscoverByIdx(int idx, uint8_t *pubkey_out, int8_t &snr_out, int8_t &snr_remote_out,
@@ -156,7 +171,7 @@ public:
 	JoystickDisplay &getDisplay() { return _display; }
 
 	/* Battery cache (updated via ui_set_battery from ui_refresh_battery's render-path call) */
-	void setCachedBattMilliVolts(uint16_t mv) { _cached_batt_mv = mv; }
+	void setCachedBattery(uint16_t mv, uint8_t pct) { _cached_batt_mv = mv; _cached_batt_pct = pct; }
 
 	/* Radio stats (fed from main companion loop) */
 	void setNoiseFloor(int16_t nf) { _noise_floor = nf; }
@@ -168,10 +183,22 @@ public:
 	uint32_t getPktSent() const { return _pkt_sent; }
 	uint32_t getPktErrors() const { return _pkt_errors; }
 
-	/* BLE status (fed from main companion loop) */
-	void setBLEConnected(bool connected) { _ble_connected = connected; }
-	bool isBLEConnected() const { return _ble_connected; }
+	/* An app is connected on some transport (fed from main companion loop) */
+	void setAppConnected(bool connected) { _app_connected = connected; }
+	bool isAppConnected() const { return _app_connected; }
 	void setBLEEnabled(bool enabled) { _ble_enabled = enabled; }
+
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+	/* WiFi companion state, pushed by ui_set_wifi() / ui_set_link_transports()
+	 * on the main thread, read by WifiScreen. */
+	void setWifi(uint8_t state, const char *ssid, const char *ip, uint16_t port);
+	void setLinkTransports(uint8_t mask) { _link_transports = mask; }
+	uint8_t getWifiState() const { return _wifi_state; }
+	const char *getWifiSsid() const { return _wifi_ssid; }
+	const char *getWifiIp() const { return _wifi_ip; }
+	uint16_t getWifiPort() const { return _wifi_port; }
+	uint8_t getLinkTransports() const { return _link_transports; }
+#endif
 
 	/* RepeaterAdmin callbacks */
 	void onRepeaterAdminLoginResult(const uint8_t *pub_key_prefix, bool success,
@@ -221,6 +248,9 @@ private:
 	RenameNodeScreen *_rename_node;
 	BLECodeScreen *_ble_code;
 	StatsScreen *_stats;
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+	WifiScreen *_wifi = nullptr;
+#endif
 	StopwatchScreen *_stopwatch;
 	CountdownScreen *_countdown;
 	SnakeScreen *_snake;
@@ -248,11 +278,19 @@ private:
 
 	/* State */
 	uint16_t _cached_batt_mv;
+	uint8_t _cached_batt_pct = 0;
 	int _battery_display_mode;
 	uint8_t _brightness;
 	bool _wake_on_msg;
-	bool _ble_connected;
+	bool _app_connected;
 	bool _ble_enabled;
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+	uint8_t _wifi_state = 0;       /* enum ui_wifi_state */
+	uint8_t _link_transports = 0;  /* UI_LINK_* bits */
+	uint16_t _wifi_port = 0;
+	char _wifi_ssid[33] = {};
+	char _wifi_ip[16] = {};
+#endif
 	int16_t _noise_floor;
 	uint32_t _pkt_recv, _pkt_sent, _pkt_errors;
 

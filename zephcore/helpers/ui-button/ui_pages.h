@@ -25,6 +25,7 @@ enum ui_page {
 	UI_PAGE_RADIO,          /* LoRa params (freq, SF, BW, CR, power, noise) */
 	UI_PAGE_TRAFFIC,        /* TX/RX packet activity graph */
 	UI_PAGE_BLUETOOTH,      /* BLE toggle */
+	UI_PAGE_WIFI,           /* WiFi companion state and IP (WiFi builds) */
 	UI_PAGE_ADVERT,         /* Send broadcast advert */
 	UI_PAGE_GPS,            /* GPS status / position */
 	UI_PAGE_BUZZER,         /* Buzzer mute toggle */
@@ -43,12 +44,14 @@ struct ui_state {
 	char     node_name[24];    /* device node name for top bar */
 	uint16_t battery_mv;
 	uint8_t  battery_pct;
-	uint32_t rtc_epoch;        /* Unix epoch from RTC (0 = not set) */
+	uint32_t rtc_epoch;        /* Unix epoch from RTC, ALWAYS UTC (0 = not set) */
+	int16_t  tz_offset_min;    /* minutes from UTC, applied at format time
+				    * only -- rtc_epoch itself is never shifted */
 
 	/* Messages page */
 	uint16_t msg_count;
-	bool     ble_connected;
-	char     device_name[25];
+	bool     app_connected;    /* an app is connected, on any transport */
+	uint8_t  link_transports;  /* UI_LINK_* bits: which transports have one */
 
 	/* Recently heard */
 	struct {
@@ -65,11 +68,6 @@ struct ui_state {
 	uint8_t  lora_cr;
 	int8_t   lora_tx_power;
 	int16_t  lora_noise_floor;
-	int8_t   lora_effective_tx_power;
-	bool     lora_apc_enabled;
-	int8_t   lora_apc_reduction;
-	int16_t  lora_apc_margin_x10;
-	uint8_t  lora_apc_target_margin;
 	uint8_t  lora_sync_word;
 	uint16_t lora_preamble_len;
 	bool     lora_rx_duty_cycle;
@@ -82,6 +80,14 @@ struct ui_state {
 
 	/* Bluetooth page */
 	bool     ble_enabled;      /* true = BLE active, false = serial mode */
+
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+	/* WiFi page */
+	uint8_t  wifi_state;       /* enum ui_wifi_state */
+	uint16_t wifi_port;        /* TCP port of the app socket */
+	char     wifi_ssid[33];
+	char     wifi_ip[16];      /* dotted IPv4, "" without a lease */
+#endif
 
 	/* GPS page */
 	bool     gps_available;    /* true = GNSS hardware detected at boot */
@@ -96,16 +102,12 @@ struct ui_state {
 	uint32_t gps_next_search_s;   /* seconds until next search (0=now/off) */
 
 	/* Buzzer page */
-	bool     buzzer_quiet;     /* true = muted */
+	uint8_t  buzzer_mode;      /* ZEPHCORE_BUZZER_{OFF,ON,VIBRATE} */
 
 	/* LEDs page */
 	bool     leds_disabled;    /* true = LEDs off */
 
 	/* Sensors page */
-	int16_t  temperature_c10;  /* centi-degrees C */
-	uint32_t pressure_pa;      /* pascals */
-	uint16_t humidity_rh10;    /* 0.1% RH */
-	uint16_t light_lux;        /* lux */
 
 	/* Current page */
 	enum ui_page current_page;
@@ -137,6 +139,14 @@ struct ui_state *ui_pages_get_state(void);
  * Draws page indicator dots, then the page-specific content.
  */
 void ui_pages_render(void);
+
+/**
+ * Milliseconds until the tiny-panel page-title flash expires, or 0 when not
+ * flashing (and always 0 on normal-sized panels). The UI task uses this to
+ * schedule the single follow-up render that replaces the flashed title with
+ * page content.
+ */
+uint32_t ui_pages_flash_remaining_ms(void);
 
 /**
  * Render a splash screen.

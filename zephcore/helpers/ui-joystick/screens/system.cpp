@@ -9,7 +9,9 @@
 #include "screen_helpers.h"
 #include <adapters/gps/ZephyrGPSManager.h>
 #include <helpers/time_sync.h>
+#include <helpers/ui/display.h>
 #include <helpers/ui/ui_mesh_actions.h>
+#include <helpers/ui/ui_task.h>
 #include <zephyr/kernel.h>
 #include <zephyr/random/random.h>
 #include <math.h>
@@ -26,9 +28,24 @@ enum SysDevItem { SYSDEV_BUZZER=0, SYSDEV_BLUETOOTH, SYSDEV_OFFGRID, SYSDEV_LEDS
 
 #define DFU_CONFIRM_WINDOW_MS 3000
 /* Display submenu items */
-enum SysDspItem { SYSDSP_BRIGHT=0, SYSDSP_SCROFF, SYSDSP_BATT, SYSDSP_WAKE, SYSDSP_COUNT };
+/* SYSDSP_ROTATE is present only where the panel can flip itself in hardware
+ * (SSD1306 / SH1106 — see MC_DISPLAY_ROTATE_SUPPORTED).  Offering a row that
+ * always fails would be worse than not offering it, and dropping it at
+ * compile time keeps the flash cost at zero on the other boards.
+ * SYSDSP_INPUT_ROTATE is unconditional: the axis swap is ours, not the
+ * panel's, so it works everywhere — including boards whose screen cannot
+ * rotate but whose stick still ends up upside down in a custom case. */
+enum SysDspItem { SYSDSP_BRIGHT=0, SYSDSP_SCROFF, SYSDSP_BATT, SYSDSP_WAKE,
+#if MC_DISPLAY_ROTATE_SUPPORTED
+									SYSDSP_ROTATE,
+#endif
+									SYSDSP_INPUT_ROTATE, SYSDSP_COUNT };
 /* Info submenu items */
-enum SysInfoItem { SYSINFO_TIME=0, SYSINFO_STATS, SYSINFO_RADIO, SYSINFO_COUNT };
+enum SysInfoItem { SYSINFO_TIME=0, SYSINFO_STATS, SYSINFO_RADIO,
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+				 SYSINFO_WIFI,
+#endif
+				 SYSINFO_COUNT };
 /* Power submenu items */
 enum SysPwrItem  { SYSPWR_REBOOT=0, SYSPWR_SHUTDOWN, SYSPWR_COUNT };
 
@@ -92,11 +109,19 @@ int SystemScreen::render(JoystickDisplay &display)
 		items[SYSDSP_SCROFF] = scroff_label;
 		items[SYSDSP_BATT] = batt_label;
 		items[SYSDSP_WAKE] = _task->getWakeOnMsg() ? "Wake on msg: ON" : "Wake on msg: OFF";
+#if MC_DISPLAY_ROTATE_SUPPORTED
+		items[SYSDSP_ROTATE] = _task->getDisplayRotate() ? "Rotate 180: ON" : "Rotate 180: OFF";
+#endif
+		items[SYSDSP_INPUT_ROTATE] = _task->getInputRotate() ? "Flip input: ON" : "Flip input: OFF";
 		renderSubMenu(display, "Display", _selected, items, SYSDSP_COUNT);
 		return 500;
 	}
 	if (_mode == SYSMODE_INFO) {
-		static const char * const kItems[SYSINFO_COUNT] = { "Time", "System Stats", "Radio Stats" };
+		static const char * const kItems[SYSINFO_COUNT] = { "Time", "System Stats", "Radio Stats",
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+								     "WiFi",
+#endif
+		};
 		renderSubMenu(display, "Info", _selected, kItems, SYSINFO_COUNT);
 		return 500;
 	}
@@ -153,6 +178,8 @@ bool SystemScreen::handleInput(char c)
 				if (_task->isOffgridEnabled()) {
 					_task->setOffgridMode(false);
 					_task->showAlert("Offgrid: OFF", 1000);
+				} else if (_task->offgridTargetKhz() == 0) {
+					_task->showAlert("No offgrid band", 1500);
 				} else {
 					_mode = SYSMODE_OFFGRID_CONFIRM;
 				}
@@ -213,6 +240,19 @@ bool SystemScreen::handleInput(char c)
 				_task->toggleWakeOnMsg();
 				_task->showAlert(_task->getWakeOnMsg() ? "Wake on msg: ON" : "Wake on msg: OFF", 1000);
 				return true;
+#if MC_DISPLAY_ROTATE_SUPPORTED
+			case SYSDSP_ROTATE:
+				if (!_task->toggleDisplayRotate()) {
+					_task->showAlert("Rotate unsupported", 1500);
+					return true;
+				}
+				_task->showAlert(_task->getDisplayRotate() ? "Rotate 180: ON" : "Rotate 180: OFF", 1000);
+				return true;
+#endif
+			case SYSDSP_INPUT_ROTATE:
+				_task->toggleInputRotate();
+				_task->showAlert(_task->getInputRotate() ? "Flip input: ON" : "Flip input: OFF", 1000);
+				return true;
 			default: return false;
 			}
 		}
@@ -227,6 +267,9 @@ bool SystemScreen::handleInput(char c)
 			case SYSINFO_TIME:  _task->gotoSystemTimeScreen(); return true;
 			case SYSINFO_STATS: _task->gotoStatsScreen();      return true;
 			case SYSINFO_RADIO: _task->gotoRadioStatsScreen(); return true;
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+			case SYSINFO_WIFI:  _task->gotoWifiScreen();       return true;
+#endif
 			default: return false;
 			}
 		}
@@ -249,8 +292,12 @@ bool SystemScreen::handleInput(char c)
 	}
 	if (_mode == SYSMODE_OFFGRID_CONFIRM) {
 		if (c == KEY_ENTER) {
+			char og_alert[24];
+			uint32_t og_khz = _task->offgridTargetKhz();
+			snprintf(og_alert, sizeof(og_alert), "Offgrid ON %u.%03u",
+				 (unsigned)(og_khz / 1000), (unsigned)(og_khz % 1000));
 			_task->setOffgridMode(true);
-			_task->showAlert("Offgrid: ON", 1000);
+			_task->showAlert(og_alert, 1500);
 			_mode = SYSMODE_DEVICE;
 			return true;
 		}
@@ -299,11 +346,27 @@ int SystemTimeScreen::render(JoystickDisplay &display)
 	display.setTextSize(1);
 	display.setColor(JoystickDisplay::GREEN);
 
-	char timeText[16], dateText[16];
-	formatUnixDateTime(_rtc->getCurrentTime(), timeText, sizeof(timeText), dateText, sizeof(dateText));
+	/* The RTC is UTC; the offset is applied here, at format time only.  It
+	 * must never reach the clock itself -- see NodePrefs::tz_offset. */
+	NodePrefs *prefs = _task->getPrefs();
+	int16_t tz_min = prefs ? tz_offset_minutes(prefs->tz_offset) : 0;
+	uint32_t epoch = _rtc->getCurrentTime();
+
+	/* Before a sync getCurrentTime() returns bare uptime, and a negative
+	 * offset would underflow it into a garbage far-future date.  Same
+	 * "time is set" threshold (2025-01-01) the other UI uses. */
+	if (epoch > 1735689600) {
+		epoch += (int32_t)tz_min * 60;
+	} else {
+		tz_min = 0;
+	}
+
+	char timeText[16], dateText[16], tzText[TZ_OFFSET_TEXT_LEN];
+	formatUnixDateTime(epoch, timeText, sizeof(timeText), dateText, sizeof(dateText));
+	tz_offset_format_label(tz_min, tzText, sizeof(tzText));
 
 	const char *labels[4] = { "Time:", "Date:", "TZ:", "Source:" };
-	const char *values[4] = { timeText, dateText, "UTC",
+	const char *values[4] = { timeText, dateText, tzText,
 							   time_sync_display_label() };
 	int y = kContentY + 2;
 	for (int i = 0; i < 4; i++) {
@@ -825,7 +888,6 @@ bool GPSSettingsScreen::handleInput(char key)
 	if (key == KEY_ENTER) {
 		if (_selected == 0) {
 			_task->toggleGPS();
-			_task->showAlert(_task->getGPSState() ? "GPS enabled" : "GPS disabled", 1000);
 		} else {
 			_task->adjustGpsDuty(1);
 		}
@@ -915,6 +977,60 @@ bool StatsScreen::handleInput(char c)
 	if (c == KEY_CANCEL || c == KEY_HOME) { _task->gotoSystemScreen(); return true; }
 	return false;
 }
+
+#ifdef CONFIG_ZEPHCORE_COMPANION_WIFI
+WifiScreen::WifiScreen(JoystickUITask *task)
+	: _task(task)
+{
+}
+
+/* Same states and wording as the button UI's WiFi page; redrawn every second. */
+int WifiScreen::render(JoystickDisplay &display)
+{
+	renderScreenHeader(display, "WiFi", 0, 0);
+	display.setTextSize(1);
+
+	char line[48];
+	int y = kContentY + 2;
+	uint8_t state = _task->getWifiState();
+
+	if (state == UI_WIFI_OFF) {
+		display.setColor(JoystickDisplay::LIGHT);
+		display.drawTextLeftAlign(0, y, "Status: off");
+		y += kMenuLineH;
+		display.drawTextLeftAlign(0, y, "Set up via CLI");
+		return 1000;
+	}
+
+	display.setColor(state == UI_WIFI_UP ? JoystickDisplay::GREEN : JoystickDisplay::YELLOW);
+	display.drawTextLeftAlign(0, y, state == UI_WIFI_UP ? "Status: connected" : "Status: joining");
+	y += kMenuLineH;
+
+	display.setColor(JoystickDisplay::LIGHT);
+	snprintf(line, sizeof(line), "SSID: %s", _task->getWifiSsid());
+	display.drawTextLeftAlign(0, y, line);
+	y += kMenuLineH;
+	if (state != UI_WIFI_UP) {
+		return 1000;
+	}
+
+	snprintf(line, sizeof(line), "IP: %s", _task->getWifiIp());
+	display.drawTextLeftAlign(0, y, line);
+	y += kMenuLineH;
+	snprintf(line, sizeof(line), "Port: %u", (unsigned)_task->getWifiPort());
+	display.drawTextLeftAlign(0, y, line);
+	y += kMenuLineH;
+	display.drawTextLeftAlign(0, y, (_task->getLinkTransports() & UI_LINK_TCP)
+				       ? "App: connected" : "App: none");
+	return 1000;
+}
+
+bool WifiScreen::handleInput(char c)
+{
+	if (c == KEY_CANCEL || c == KEY_HOME) { _task->gotoSystemScreen(); return true; }
+	return false;
+}
+#endif
 
 TelemetryScreen::TelemetryScreen(JoystickUITask *task, mesh::RTCClock *rtc)
 	: _task(task), _rtc(rtc), _selected(0)

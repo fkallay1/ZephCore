@@ -16,6 +16,7 @@
 
 #include "display.h"
 #include "doom_game.h"
+#include "pm_sleep_guard.h"
 
 #include <zephyr/device.h>
 #include <zephyr/display/cfb.h>
@@ -47,7 +48,23 @@ LOG_MODULE_REGISTER(zephcore_display, CONFIG_ZEPHCORE_BOARD_LOG_LEVEL);
 
 static const struct device *disp_dev;
 static bool disp_on;
+
+/* The display goes on or off. No SoC light sleep while it is on: someone is
+ * using the UI (devdocs/lld/13-power-management.md, section 13). */
+static void disp_set_on(bool on)
+{
+	if (on == disp_on) {
+		return;
+	}
+	disp_on = on;
+	if (on) {
+		zc_pm_block_sleep();
+	} else {
+		zc_pm_unblock_sleep();
+	}
+}
 static bool disp_initialized;
+static bool disp_rotated;     /* panel flipped 180 degrees (upside-down mount) */
 
 /* Runtime display geometry (queried from driver) */
 static uint16_t disp_width;
@@ -60,6 +77,17 @@ static bool     is_epd;       /* true for e-paper displays */
 static bool     has_color;    /* true when a raw RGB565 TFT is available */
 
 const uint8_t *zephcore_font_6x8_glyph(uint8_t c);
+
+#if IS_ENABLED(CONFIG_ZEPHCORE_DISPLAY_LARGE_FONT)
+#define COLOR_FONT_SCALE_NUM 3
+#define COLOR_FONT_SCALE_DEN 2
+#else
+#define COLOR_FONT_SCALE_NUM 1
+#define COLOR_FONT_SCALE_DEN 1
+#endif
+
+#define COLOR_FONT_W (6 * COLOR_FONT_SCALE_NUM / COLOR_FONT_SCALE_DEN)
+#define COLOR_FONT_H (8 * COLOR_FONT_SCALE_NUM / COLOR_FONT_SCALE_DEN)
 
 #define COLOR_TEXT_MAX_CHARS 32
 #define COLOR_MAX_OPS        72
@@ -85,7 +113,7 @@ static uint8_t color_op_count;
 static uint16_t color_line[COLOR_MAX_WIDTH];
 
 static const struct device *color_dev =
-	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(tft));
+	DEVICE_DT_GET_OR_NULL(MC_DISPLAY_COLOR_NODE);
 #endif /* MC_DISPLAY_COLOR_PANEL */
 
 /* Optional symmetric inset (pixels).  Shrinks reported width/height and
@@ -257,23 +285,31 @@ static void color_write_rect_now(int x, int y, int w, int h, uint16_t color)
 
 static void color_write_char_now(int x, int y, uint8_t c, uint16_t color)
 {
-	uint16_t glyph_buf[6 * 8];
+	uint16_t glyph_buf[COLOR_FONT_W * COLOR_FONT_H];
 	const uint8_t *glyph = zephcore_font_6x8_glyph(c);
 	uint16_t fg = sys_cpu_to_be16(color);
 	uint16_t bg = sys_cpu_to_be16(MC_COLOR_BLACK);
 
-	for (int row = 0; row < 8; row++) {
-		for (int col = 0; col < 6; col++) {
-			bool on = (glyph[col] >> row) & 0x01;
-			glyph_buf[row * 6 + col] = on ? fg : bg;
+	/* Nearest-neighbour upscale of the 6x8 glyph, mapped dest→src so
+	 * every output pixel is written exactly once (a src→dest block copy
+	 * with a fractional scale overwrites neighbouring blocks and thins
+	 * strokes unevenly). */
+	for (int py = 0; py < COLOR_FONT_H; py++) {
+		int row = py * COLOR_FONT_SCALE_DEN / COLOR_FONT_SCALE_NUM;
+
+		for (int px = 0; px < COLOR_FONT_W; px++) {
+			int col = px * COLOR_FONT_SCALE_DEN / COLOR_FONT_SCALE_NUM;
+
+			glyph_buf[py * COLOR_FONT_W + px] =
+				((glyph[col] >> row) & 0x01) ? fg : bg;
 		}
 	}
 
 	const struct display_buffer_descriptor desc = {
 		.buf_size = sizeof(glyph_buf),
-		.width = 6,
-		.height = 8,
-		.pitch = 6,
+		.width = COLOR_FONT_W,
+		.height = COLOR_FONT_H,
+		.pitch = COLOR_FONT_W,
 	};
 
 	display_write(color_dev, (uint16_t)(x + DISP_INSET),
@@ -286,13 +322,13 @@ static void color_write_text_now(int x, int y, const char *text, uint16_t color)
 		return;
 	}
 
-	for (const char *p = text; *p; p++, x += 6) {
+	for (const char *p = text; *p; p++, x += COLOR_FONT_W) {
 		uint8_t c = (uint8_t)*p;
 
 		if (c < 32) {
 			c = '?';
 		}
-		if (x + 6 > (int)mc_display_width() || y + 8 > (int)mc_display_height()) {
+		if (x + COLOR_FONT_W > (int)mc_display_width() || y + COLOR_FONT_H > (int)mc_display_height()) {
 			break;
 		}
 		color_write_char_now(x, y, c, color);
@@ -355,7 +391,7 @@ static void auto_off_handler(struct k_work *work)
 	 * mc_display_on() → backlight restore. */
 	if (is_epd) {
 		backlight_set(false);
-		disp_on = false;
+		disp_set_on(false);
 		return;
 	}
 	if (disp_on) {
@@ -364,13 +400,8 @@ static void auto_off_handler(struct k_work *work)
 }
 
 /* ========== Early blanking ==========
- * OLED controllers (SSD1306, SH1106) turn the display ON during driver init,
- * showing stale VRAM from before reset.  Our mc_display_init() runs much later
- * (after BLE, LoRa, etc.), so there's a visible garbage flash.
- *
- * Fix: SYS_INIT hook runs right after the driver, sending "Display OFF" before
- * main() starts.  This is harmless for non-OLED displays (blanking is a no-op
- * or already blanked). */
+ * OLED controllers switch the panel on during driver init and show stale
+ * VRAM. Send Display OFF right after the driver, before main(). */
 static int display_early_blank(void)
 {
 	const struct device *dev = NULL;
@@ -458,13 +489,8 @@ int mc_display_init(void)
 		return ret;
 	}
 
-	/* Font selection.
-	 * Default: smallest height for best text density — our custom 6x8
-	 * Latin-1 font typically wins on OLEDs.
-	 * LARGE_FONT: smallest font whose height is >= 16 — picks Zephyr's
-	 * built-in 10x16 (cfb_fonts.c) for larger e-paper panels where 6x8
-	 * is too small to read.  Falls back to smallest-overall if no tall
-	 * font is compiled in. */
+	/* Font selection: the smallest height by default; with LARGE_FONT the
+	 * smallest font at least 16 high, falling back to the smallest overall. */
 	const bool want_large = IS_ENABLED(CONFIG_ZEPHCORE_DISPLAY_LARGE_FONT);
 	int num_fonts = cfb_get_numof_fonts(disp_dev);
 
@@ -514,6 +540,16 @@ int mc_display_init(void)
 	 * SSD1306 OLED reports MONO01 by default, which CFB now handles
 	 * correctly (white pixels on black background) without manual invert. */
 
+	/* E-paper is the exception: the page is white and the ink is black.
+	 * ssd16xx reported MONO10 until Zephyr b3150095671, so CFB flipped the
+	 * frame for us; it now reports MONO01 (a set RAM bit is a white pixel),
+	 * which CFB passes through as white text on a black page.  Keyed on the
+	 * reported format so it is a no-op against a driver that still says
+	 * MONO10.  mc_display_text()'s invert toggles are relative to this. */
+	if (is_epd && caps.current_pixel_format == PIXEL_FORMAT_MONO01) {
+		cfb_framebuffer_invert(disp_dev);
+	}
+
 	/* Clear CPU-side framebuffer (zeroes the RAM buffer — no SPI transfer). */
 	cfb_framebuffer_clear(disp_dev, false);
 
@@ -526,7 +562,7 @@ int mc_display_init(void)
 	}
 	display_blanking_off(disp_dev);
 	backlight_set(true);
-	disp_on = true;
+	disp_set_on(true);
 	disp_initialized = true;
 
 	/* Set up auto-off timer and schedule initial timeout */
@@ -562,6 +598,18 @@ uint8_t mc_display_font_height(void)
 	return font_h;
 }
 
+#if MC_DISPLAY_COLOR_PANEL
+uint8_t mc_display_color_font_width(void)
+{
+	return COLOR_FONT_W;
+}
+
+uint8_t mc_display_color_font_height(void)
+{
+	return COLOR_FONT_H;
+}
+#endif
+
 void mc_display_on(void)
 {
 	if (!disp_initialized) {
@@ -574,7 +622,7 @@ void mc_display_on(void)
 		if (!is_epd) {
 			display_blanking_off(disp_dev);
 		}
-		disp_on = true;
+		disp_set_on(true);
 	}
 	backlight_set(true);
 
@@ -590,7 +638,7 @@ void mc_display_off(void)
 	if (disp_on) {
 		display_blanking_on(disp_dev);
 		backlight_set(false);
-		disp_on = false;
+		disp_set_on(false);
 	}
 }
 
@@ -602,6 +650,43 @@ bool mc_display_is_on(void)
 bool mc_display_is_epd(void)
 {
 	return is_epd;
+}
+
+int mc_display_set_rotated(bool rotated)
+{
+#if !MC_DISPLAY_ROTATE_SUPPORTED
+	ARG_UNUSED(rotated);
+	return -ENOTSUP;
+#else
+	if (!disp_initialized) {
+		return -ENODEV;
+	}
+	if (rotated == disp_rotated) {
+		return 0;
+	}
+
+	/* Panel-level remap: the driver rewrites SEGMENT_MAP + COM_OUTPUT_SCAN
+	 * and the existing framebuffer contents come back out mirrored on both
+	 * axes.  Nothing to redraw, and no cost on subsequent frames. */
+	int ret = display_set_orientation(disp_dev,
+					  rotated ? DISPLAY_ORIENTATION_ROTATED_180
+						  : DISPLAY_ORIENTATION_NORMAL);
+
+	if (ret) {
+		LOG_WRN("display rotate %s failed: %d",
+			rotated ? "180" : "normal", ret);
+		return ret;
+	}
+
+	disp_rotated = rotated;
+	LOG_INF("display rotated %s", rotated ? "180" : "normal");
+	return 0;
+#endif
+}
+
+bool mc_display_is_rotated(void)
+{
+	return disp_rotated;
 }
 
 #if MC_DISPLAY_COLOR_PANEL
@@ -777,24 +862,9 @@ void mc_display_finalize(void)
 	const int full_interval = CONFIG_ZEPHCORE_DISPLAY_EPD_FULL_REFRESH_INTERVAL;
 
 	if (is_epd && full_interval > 0 && ++epd_partial_count >= (uint32_t)full_interval) {
-		/* Periodic full refresh to clear accumulated ghosting.
-		 *
-		 * Replicate the clean post-boot sequence: full-refresh the panel
-		 * to WHITE, then redraw the current page as a partial.  blanking_on
-		 * selects the FULL profile; ssd16xx_fill_ram_white clears BOTH RAM
-		 * banks to white; blanking_off runs the full-refresh waveform,
-		 * leaving the panel (and both RAM banks) white.  The trailing
-		 * cfb_framebuffer_finalize then redraws the current frame — still
-		 * held in the CFB buffer — as a partial against the all-white
-		 * reference: every content pixel is actively driven and there is
-		 * nothing stale to erase.
-		 *
-		 * Going through white is required.  A partial after a full refresh
-		 * of *content* leaves unchanged regions (e.g. the top bar) on the
-		 * neutral waveform → they fade; and forcing the old-frame reference
-		 * white while the panel still shows content fails to erase pixels
-		 * that should clear → letters overlap.  The brief white flash is
-		 * the intended clean between frames. */
+		/* Periodic full refresh to clear ghosting: full-refresh the panel to white,
+		 * then redraw the current frame as a partial. Going through white is
+		 * required. */
 		display_blanking_on(disp_dev);
 #if ZEPHCORE_DISPLAY_HAS_SSD16XX
 		ssd16xx_fill_ram_white(disp_dev);
@@ -854,7 +924,7 @@ void mc_display_epd_full_reset(void)
 	/* After splash handoff, keep frontlight off; next user interaction
 	 * wakes it via mc_display_on(). */
 	backlight_set(false);
-	disp_on = false;
+	disp_set_on(false);
 }
 
 const struct device *mc_display_get_device(void)

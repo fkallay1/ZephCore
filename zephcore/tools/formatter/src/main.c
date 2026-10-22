@@ -8,7 +8,7 @@
  *   - SDv6: covers RAK4631, ThinkNode M1/M3/M6, ProMicro LR2021, RAK WisMesh Tag
  *   - SDv7: covers T1000-E, Wio Tracker L1, Ikoka Nano 30dBm
  *
- * Internal flash uses DTS FIXED_PARTITION_EXISTS — partition layout is identical
+ * Internal flash uses DTS PARTITION_EXISTS — partition layout is identical
  * across all boards with the same SoftDevice version.
  *
  * QSPI external flash uses bare-metal register probing (qspi_probe.c) — no
@@ -31,6 +31,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/reboot.h>
+#include <errno.h>
 #include "qspi_probe.h"
 
 #if defined(CONFIG_SOC_SERIES_NRF52)
@@ -108,21 +109,27 @@ int main(void)
 	led_on();
 
 	/* ── LittleFS partition (all platforms) ── */
-#if FIXED_PARTITION_EXISTS(lfs_partition)
-	if (erase_partition(FIXED_PARTITION_ID(lfs_partition), "LittleFS (/lfs)")) {
+#if PARTITION_EXISTS(lfs_partition)
+	if (erase_partition(PARTITION_ID(lfs_partition), "LittleFS (/lfs)")) {
 		errors++;
 	}
 #endif
 
 	/* ── NVS storage partition (ESP32 etc.) ── */
-#if FIXED_PARTITION_EXISTS(storage_partition)
-	if (erase_partition(FIXED_PARTITION_ID(storage_partition), "NVS (storage)")) {
+#if PARTITION_EXISTS(storage_partition)
+	if (erase_partition(PARTITION_ID(storage_partition), "NVS (storage)")) {
 		errors++;
 	}
 #endif
 
 	/* ── QSPI external flash (auto-detect via pin probing) ── */
-	qspi_probe_and_erase();  /* Probes all known boards; skips if no flash found */
+	/* Probes all known boards. Finding no flash is normal (most boards have
+	 * none); a flash that answered and then failed to erase is an error. */
+	int qspi_rc = qspi_probe_and_erase();
+
+	if (qspi_rc && qspi_rc != -ENODEV) {
+		errors++;
+	}
 
 	led_off();
 
@@ -130,8 +137,11 @@ int main(void)
 	printk("\n");
 	if (errors) {
 		printk("Completed with %d error(s).\n", errors);
+	} else if (qspi_rc == 0) {
+		printk("All partitions erased successfully (internal flash + QSPI).\n");
 	} else {
-		printk("All partitions erased successfully.\n");
+		printk("Internal flash erased successfully. No external QSPI flash was\n");
+		printk("erased: none answered (normal on a board without one).\n");
 	}
 
 	printk("Rebooting into UF2 DFU mode...\n");

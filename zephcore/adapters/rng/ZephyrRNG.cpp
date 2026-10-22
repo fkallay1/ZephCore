@@ -8,9 +8,20 @@
 #include <zephyr/sys/reboot.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/drivers/hwinfo.h>
+#include <zephyr/timing/timing.h>   /* portable CPU cycle counter for the beat */
 #include <psa/crypto.h>
 #include <string.h>
 #include <mesh/Utils.h>
+
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
+/* Pre-RF entropy for the ESP32 HWRNG — see esp32_entropy_begin() below.
+ * Source file is added to the build by CMakeLists.txt (ESP32 only). */
+#include <bootloader_random.h>
+/* RTC-slow clock read for the two-clock beat entropy source (sample_rtc_beat).
+ * esp_rtc_get_time_us() links in an app build (verified via the selftest). */
+#include <esp_rtc_time.h>
+#endif
+
 
 BUILD_ASSERT(IS_ENABLED(CONFIG_CSPRNG_ENABLED),
 	"ZephyrRNG requires CONFIG_CSPRNG_ENABLED for cryptographic key derivation");
@@ -30,113 +41,187 @@ void ZephyrRNG::random(uint8_t *dest, size_t sz)
 	Utils::cryptoPanicReboot("CSPRNG unavailable after retries");
 }
 
-/* ===== Jitter sampling + online health check =============================
- *
- * Stephan Müller "CPU Time Jitter Based Non-Physical True Random Number
- * Generator" — Linux kernel's jitterentropy_rng. NIST SP 800-90B has
- * a compliance class for this entropy source type.
- *
- * Per-sample min-entropy on simple in-order embedded CPUs (Cortex-M,
- * RISC-V, Xtensa) is conservatively 0.1-0.3 bits per cycle-counter
- * delta. At 200ms × 160MHz / 1000 cycles per sample = 32,000 samples
- * × 0.1 bits = 3,200 estimated bits. 256 needed for Ed25519 → 12×
- * margin even pessimistically.
- *
- * Health check (NIST SP 800-90B style): online repetition count + a
- * distinct-value check tracked across all samples in the window with
- * scalar state — no per-sample buffer needed. Detects stuck-source
- * catastrophic failure (e.g. cycle counter not advancing). Does not
- * statistically prove entropy quality — that's what the literature is
- * for. */
+/* ===== Timing-entropy health check =====
+ * Repetition count plus a distinct-value check over the window, with scalar
+ * state. Detects a stuck source; it does not prove entropy quality. */
 
-static bool sample_cpu_jitter(uint8_t *pool, size_t pool_size,
-			      size_t pool_offset, uint32_t duration_ms)
+/* Health statistics for one beat window.  Timing statistics only — never
+ * pool contents or derived key material.  Reporting these is standard practice
+ * for a NIST SP 800-90B style noise source; reporting the bytes would not be. */
+/* Per-stage health reporting can be silenced. The node wants it — it fires
+ * once, at first-boot identity generation, and is the only record of what the
+ * entropy sources actually did. The selftest tool calls mixIdentitySeed
+ * thousands of times and must be able to shut it up after the first few, or
+ * the summary drowns in ~12 lines x N. */
+static bool s_seed_report_quiet;
+
+#define RNG_RPT(...) do { if (!s_seed_report_quiet) printk(__VA_ARGS__); } while (0)
+
+void ZephyrRNG::setSeedHealthQuiet(bool quiet)
 {
-	uint32_t accum = k_cycle_get_32();
+	s_seed_report_quiet = quiet;
+}
+
+#if defined(ZEPHCORE_RNG_TEST_HOOKS)
+/* When set, the HWRNG contribution to mixIdentitySeed is zeroed after each
+ * draw — see the header. Test scaffolding, compiled out of production. */
+static bool s_test_kill_hwrng;
+void ZephyrRNG::setTestKillHWRNG(bool kill) { s_test_kill_hwrng = kill; }
+#endif
+
+struct beat_stats {
+	int      n_samples;
+	int      n_distinct;   /* distinct delta values seen, capped at 8 */
+	int      max_consec;   /* longest run of identical deltas */
+	uint32_t min_delta;
+	uint32_t max_delta;
+	bool     ok;
+};
+
+/* ===== Universal two-clock beat entropy =====
+ * CPU cycles counted across a fixed interval of an independent slow
+ * oscillator: ESP32's RTC-slow clock, or a system timer below 1 MHz (nRF's
+ * 32.768 kHz RTC). Where no independent slow clock exists the timing stages
+ * are skipped and the board relies on its TRNG. Window 500 us. */
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
+#define BEAT_SLOW_HZ        1000000ULL
+static inline uint64_t beat_slow_ticks(void) { return esp_rtc_get_time_us(); }
+#define HAVE_TWO_CLOCK_BEAT 1
+#elif (CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC < 1000000)
+#define BEAT_SLOW_HZ        ((uint64_t)CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC)
+static inline uint64_t beat_slow_ticks(void) { return k_cycle_get_32(); }
+#define HAVE_TWO_CLOCK_BEAT 1
+#endif
+
+#ifdef HAVE_TWO_CLOCK_BEAT
+#define BEAT_WINDOW_US    500
+/* slow-clock ticks per window; >= 1 guaranteed for any BEAT_SLOW_HZ >= 2 kHz */
+#define BEAT_WINDOW_TICKS ((uint32_t)((BEAT_SLOW_HZ * BEAT_WINDOW_US) / 1000000ULL))
+
+static bool sample_two_clock_beat(uint8_t *pool, size_t pool_size,
+				  size_t pool_offset, uint32_t duration_ms,
+				  struct beat_stats *st = nullptr)
+{
+	/* Enable the CPU cycle counter once (DWT on Cortex-M; no-op-ish on
+	 * Xtensa where CCOUNT always runs). */
+	static bool timing_ready;
+	if (!timing_ready) {
+		timing_init();
+		timing_start();
+		timing_ready = true;
+	}
+
 	int64_t deadline = k_uptime_get() + duration_ms;
 	size_t idx = pool_offset;
-
-	/* Online health stats: 32 bytes total vs. the previous 512-byte
-	 * deltas[] array. Tracks every sample, not just the first 128. */
+	uint32_t min_delta = UINT32_MAX, max_delta = 0;
 	uint32_t prev_delta = 0;
 	int cur_consec = 0, max_consec = 0;
 	uint32_t distinct[8] = {0};
-	int n_distinct = 0;
-	int n_samples = 0;
+	int n_distinct = 0, n_samples = 0;
 
 	while (k_uptime_get() < deadline) {
-		uint32_t t1 = k_cycle_get_32();
-		/* Variable-time work — number of iterations depends on the
-		 * accumulator, so timing depends on hardware nondeterminism
-		 * (cache, branch prediction, ISR firing). */
-		volatile uint32_t a = accum;
-		uint32_t iters = (accum & 0x7f);
-		for (uint32_t i = 0; i < iters; i++) {
-			a = a * 1664525u + 1013904223u;
+		uint64_t s0 = beat_slow_ticks();
+		uint32_t f0 = (uint32_t)timing_counter_get();
+		while ((beat_slow_ticks() - s0) < BEAT_WINDOW_TICKS) {
+			/* CPU cycle counter advances while the independent slow
+			 * oscillator defines the window; the two drift */
 		}
-		accum = a;
-		uint32_t t2 = k_cycle_get_32();
-		uint32_t delta = t2 - t1;
+		uint32_t f1 = (uint32_t)timing_counter_get();
+		uint32_t delta = f1 - f0;
 
-		/* Mix into entropy pool */
+		/* Mix the FULL delta — entropy spans ~11 bits, not the low byte. */
 		pool[idx++ % pool_size] ^= (uint8_t)delta;
 		pool[idx++ % pool_size] ^= (uint8_t)(delta >> 8);
-		pool[idx++ % pool_size] ^= (uint8_t)accum;
-		pool[idx++ % pool_size] ^= (uint8_t)(accum >> 8);
+		pool[idx++ % pool_size] ^= (uint8_t)(delta >> 16);
+		pool[idx++ % pool_size] ^= (uint8_t)(delta >> 24);
 
-		/* Online repetition count */
-		if (n_samples > 0 && delta == prev_delta) {
+		/* Health stats on the low 14 bits (where the beat lives): a
+		 * frozen/domain-locked slow clock freezes the delta and trips
+		 * the repetition count. */
+		uint32_t d14 = delta & 0x3FFF;
+		if (n_samples > 0 && d14 == prev_delta) {
 			if (++cur_consec > max_consec) max_consec = cur_consec;
 		} else {
 			cur_consec = 1;
 		}
-		prev_delta = delta;
+		prev_delta = d14;
 
-		/* Track first 8 distinct delta values */
 		if (n_distinct < 8) {
 			bool found = false;
 			for (int j = 0; j < n_distinct; j++) {
-				if (distinct[j] == delta) { found = true; break; }
+				if (distinct[j] == d14) { found = true; break; }
 			}
-			if (!found) distinct[n_distinct++] = delta;
+			if (!found) distinct[n_distinct++] = d14;
 		}
+
+		if (d14 < min_delta) min_delta = d14;
+		if (d14 > max_delta) max_delta = d14;
 
 		n_samples++;
 	}
 
-	if (n_samples < 16) return false;
-	if (max_consec >= 32) return false;  /* stuck source */
-	return n_distinct >= 5;               /* minimal variance */
+	bool ok = (n_samples >= 16)      /* enough samples             */
+		&& (max_consec < 32)     /* slow clock not frozen      */
+		&& (n_distinct >= 5);    /* beat actually varies       */
+
+	if (st) {
+		st->n_samples  = n_samples;
+		st->n_distinct = n_distinct;
+		st->max_consec = max_consec;
+		st->min_delta  = (n_samples > 0) ? min_delta : 0;
+		st->max_delta  = max_delta;
+		st->ok         = ok;
+	}
+	return ok;
+}
+#endif /* HAVE_TWO_CLOCK_BEAT */
+
+/* Count distinct byte values in a buffer — a repetition/adaptive-proportion
+ * style health indicator for a CSPRNG draw.  A stuck source collapses this to
+ * 1.  Deliberately coarse: one integer per draw, which detects catastrophic
+ * failure without meaningfully describing the bytes themselves. */
+static int distinct_bytes(const uint8_t *buf, size_t len)
+{
+	bool seen[256] = {false};
+	int n = 0;
+	for (size_t i = 0; i < len; i++) {
+		if (!seen[buf[i]]) { seen[buf[i]] = true; n++; }
+	}
+	return n;
 }
 
-/* ===== Entropy extraction via AES-256-CTR ================================
- *
- * Per crypto consultant (MeshCore upstream PR#2280 author): the
- * conditioning step is most correctly an XOF or stream cipher, not a
- * truncated hash. For our 32-byte Ed25519-seed output the difference
- * is design hygiene rather than security, but the cost is the same
- * order of magnitude (~one SHA-512 vs SHA-256 + two AES-ECB blocks).
- *
- * Construction (NIST SP 800-108 KDF-in-Counter-Mode style):
- *   1. Extract: SHA-256(pool) → 32-byte AES-256 key.
- *   2. Expand:  AES-256-ECB(counter_i) for counter_i = 0, 1, 2 ...
- *               output = concatenation of ciphertext blocks.
- * Plaintext-XOR (true CTR mode) is omitted because plaintext would be
- * all-zero — we want just the keystream.
- *
- * Uses PSA crypto API (already enabled via PSA_WANT_KEY_TYPE_AES +
- * PSA_WANT_ALG_ECB_NO_PADDING in zephcore_common.conf).
- */
+/* One line per beat window: `distinct` is capped at 8 (pass at 5), `maxrep`
+ * is the longest run of identical deltas (fail at 32). No statistics on the
+ * conditioned output: AES-CTR makes any input look uniform. */
+#ifdef HAVE_TWO_CLOCK_BEAT
+static void report_beat(const char *label, const struct beat_stats *st)
+{
+	RNG_RPT("[RNG] %s: samples=%d distinct=%d/8 maxrep=%d "
+	       "delta=[%u..%u] -> %s\n",
+	       label, st->n_samples, st->n_distinct, st->max_consec,
+	       st->min_delta, st->max_delta, st->ok ? "PASS" : "FAIL");
+}
+#endif /* HAVE_TWO_CLOCK_BEAT */
+
+/* ===== Entropy extraction via AES-256-CTR =====
+ * Extract: SHA-256(pool) = AES-256 key. Expand: AES-256-ECB over a counter,
+ * the ciphertext blocks concatenated. Every failure path fills `err` with the
+ * failing step and the psa_status_t. */
 static int extract_via_aes_ctr(const uint8_t *pool, size_t pool_len,
-			       uint8_t *out, size_t out_len)
+			       uint8_t *out, size_t out_len,
+			       char *err, size_t err_len)
 {
 	psa_status_t status;
 	uint8_t key[32];
 	size_t key_len = 0;
 
 	/* PSA is idempotent — already initialized via mbedTLS but a defensive
-	 * call here costs nothing if it returns PSA_ERROR_ALREADY_EXISTS. */
-	(void)psa_crypto_init();
+	 * call here costs nothing if it returns PSA_ERROR_ALREADY_EXISTS.
+	 * Status kept (not discarded) purely for the error text: a failed init
+	 * makes every call below return PSA_ERROR_BAD_STATE, and reporting both
+	 * numbers together separates "PSA never came up" from "this one
+	 * operation failed". */
+	psa_status_t init_status = psa_crypto_init();
 
 	/* Extract: SHA-256(pool) → AES key.  Open-coded here (NOT Utils::sha256)
 	 * on purpose: that wrapper returns void and silently zeroes its output on
@@ -148,6 +233,9 @@ static int extract_via_aes_ctr(const uint8_t *pool, size_t pool_len,
 				  key, sizeof(key), &key_len);
 	if (status != PSA_SUCCESS || key_len != sizeof(key)) {
 		Utils::secureZeroize(key, sizeof(key));
+		snprintk(err, err_len,
+			 "AES-CTR extract: sha256 psa=%d len=%u init=%d",
+			 (int)status, (unsigned)key_len, (int)init_status);
 		return -1;
 	}
 
@@ -163,6 +251,9 @@ static int extract_via_aes_ctr(const uint8_t *pool, size_t pool_len,
 	/* Wipe stack-resident AES key — secureZeroize survives -Os DSE. */
 	Utils::secureZeroize(key, sizeof(key));
 	if (status != PSA_SUCCESS) {
+		snprintk(err, err_len,
+			 "AES-CTR extract: import_key psa=%d init=%d",
+			 (int)status, (int)init_status);
 		return -1;
 	}
 
@@ -177,6 +268,10 @@ static int extract_via_aes_ctr(const uint8_t *pool, size_t pool_len,
 					    counter, sizeof(counter),
 					    block, sizeof(block), &block_out);
 		if (status != PSA_SUCCESS || block_out != sizeof(block)) {
+			snprintk(err, err_len,
+				 "AES-CTR extract: cipher psa=%d out=%u at %u init=%d",
+				 (int)status, (unsigned)block_out,
+				 (unsigned)pos, (int)init_status);
 			ret = -1;
 			break;
 		}
@@ -204,8 +299,26 @@ void ZephyrRNG::mixIdentitySeed(uint8_t *out, size_t out_len,
 	uint8_t pool[512];
 	memset(pool, 0, sizeof(pool));
 
-	/* Stage 1: early CSPRNG (strong on nRF/MG24, weak on ESP32 pre-radio) */
-	(void)sys_csrand_get(pool, 64);
+	/* ESP32 only: bootloader_random_enable() feeds the HWRNG for the collection
+	 * phase, because without RF it gets no hardware entropy. Unsafe once RF or
+	 * the ADC is in use: do not call mixIdentitySeed() after bt_enable(). */
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
+	bootloader_random_enable();
+	RNG_RPT("[RNG] === identity seed health ===\n");
+	RNG_RPT("[RNG] esp32 pre-RF entropy (bootloader_random): ENABLED\n");
+#else
+	RNG_RPT("[RNG] === identity seed health ===\n");
+	RNG_RPT("[RNG] platform TRNG is radio-independent (no pre-RF workaround needed)\n");
+#endif
+
+	/* Stage 1: early CSPRNG (strong on nRF/MG24; on ESP32 this is only real
+	 * because bootloader_random_enable() above is feeding the HWRNG) */
+	int rc1 = sys_csrand_get(pool, 64);
+#if defined(ZEPHCORE_RNG_TEST_HOOKS)
+	if (s_test_kill_hwrng) memset(pool, 0, 64);   /* simulate dead HWRNG */
+#endif
+	RNG_RPT("[RNG] stage1 csrand    : rc=%d distinct=%d/64\n",
+	       rc1, distinct_bytes(pool, 64));
 
 	/* Stage 2: HWINFO unique device ID — uniqueness across devices */
 	uint8_t devid[16] = {0};
@@ -213,46 +326,76 @@ void ZephyrRNG::mixIdentitySeed(uint8_t *out, size_t out_len,
 	for (ssize_t i = 0; i < devid_len && i < (ssize_t)sizeof(devid); i++) {
 		pool[64 + i] ^= devid[i];
 	}
+	/* NOT secret — this is the efuse/FICR serial, public and printed at boot.
+	 * It contributes uniqueness between devices, never unpredictability. */
+	RNG_RPT("[RNG] stage2 hwinfo id  : %d bytes (public — uniqueness only)\n",
+	       (int)devid_len);
 
-	/* Stage 3: caller-supplied entropy (e.g. ADC LSB noise) */
+	/* Stage 3: caller-supplied entropy. A hook for a caller that has its own
+	 * physical noise (e.g. an externally sampled ADC/RF value); unused today,
+	 * so normally a no-op. Kept because it costs nothing when null and gives
+	 * a board a way to inject a source without touching this file. The
+	 * internal battery-ADC experiment was removed — a driven divider yielded
+	 * no reliable entropy and did not justify the complexity in the key path. */
 	if (extra && extra_len > 0) {
 		size_t n = (extra_len < 32) ? extra_len : 32;
 		for (size_t i = 0; i < n; i++) pool[80 + i] ^= extra[i];
+		RNG_RPT("[RNG] stage3 extra    : %d bytes\n", (int)n);
 	}
 
-	/* Stage 4: CPU cycle-counter jitter, 200ms.
-	 *
-	 * Skipped on POSIX arch (native_sim / Linux): the simulated clock only
-	 * advances when Zephyr threads yield, so k_uptime_get() is frozen while
-	 * this loop spins → infinite loop.  On Linux we have /dev/urandom (via
-	 * sys_csrand_get in stages 1 and 5) which is a far stronger source than
-	 * jitter sampling anyway. */
-#ifndef CONFIG_ARCH_POSIX
-	bool health_ok = sample_cpu_jitter(pool, sizeof(pool), 112, 200);
+	/* Stage 4: hardware-timing entropy, 200 ms of the two-clock beat. Skipped
+	 * where no independent slow clock exists, and on POSIX (the simulated clock
+	 * does not advance while this loop spins). */
+#if defined(HAVE_TWO_CLOCK_BEAT) && !defined(CONFIG_ARCH_POSIX)
+	struct beat_stats js = {};
+	bool health_ok = sample_two_clock_beat(pool, sizeof(pool), 112, 200, &js);
+	report_beat("stage4 beat 200ms", &js);
 	if (!health_ok) {
-		printk("ZephyrRNG: jitter health check failed, resampling 400ms\n");
-		health_ok = sample_cpu_jitter(pool, sizeof(pool), 112, 400);
+		RNG_RPT("[RNG] stage4 FAILED — resampling at 400ms\n");
+		health_ok = sample_two_clock_beat(pool, sizeof(pool), 112, 400, &js);
+		report_beat("stage4 beat 400ms", &js);
 		if (!health_ok) {
-			printk("ZephyrRNG: jitter health still failing — continuing with mixed sources\n");
+			RNG_RPT("[RNG] stage4 STILL FAILING — continuing with mixed sources\n");
 		}
 	}
-#endif /* CONFIG_ARCH_POSIX */
+#else
+	RNG_RPT("[RNG] stage4/6 skipped — no independent slow clock (TRNG via csrand only)\n");
+#endif /* HAVE_TWO_CLOCK_BEAT && !CONFIG_ARCH_POSIX */
 
 	/* Stage 5: late CSPRNG — catches any mid-boot radio init that
-	 * warmed the TRNG during the 200ms jitter window */
-	(void)sys_csrand_get(pool + 368, 64);
+	 * warmed the TRNG during the stage-4 window */
+	int rc5 = sys_csrand_get(pool + 368, 64);
+#if defined(ZEPHCORE_RNG_TEST_HOOKS)
+	if (s_test_kill_hwrng) memset(pool + 368, 0, 64);   /* simulate dead HWRNG */
+#endif
+	RNG_RPT("[RNG] stage5 csrand    : rc=%d distinct=%d/64\n",
+	       rc5, distinct_bytes(pool + 368, 64));
 
-	/* Stage 6: second jitter sample, independent timing window */
-#ifndef CONFIG_ARCH_POSIX
-	(void)sample_cpu_jitter(pool, sizeof(pool), 432, 50);
-#endif /* CONFIG_ARCH_POSIX */
+	/* Stage 6: second hardware-timing sample, independent window */
+#if defined(HAVE_TWO_CLOCK_BEAT) && !defined(CONFIG_ARCH_POSIX)
+	struct beat_stats js6 = {};
+	(void)sample_two_clock_beat(pool, sizeof(pool), 432, 50, &js6);
+	report_beat("stage6 beat  50ms", &js6);
+#endif /* HAVE_TWO_CLOCK_BEAT && !CONFIG_ARCH_POSIX */
+
+	/* Collection done — release the SAR ADC before anything else needs it.
+	 * Unconditional: every path below this point either returns normally or
+	 * reboots, so there is no path that leaves it enabled. */
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
+	bootloader_random_disable();
+	RNG_RPT("[RNG] esp32 pre-RF entropy: DISABLED (ADC released)\n");
+#endif
+	RNG_RPT("[RNG] === end (extracting %u bytes via AES-256-CTR) ===\n",
+	       (unsigned)out_len);
 
 	/* Final conditioning: AES-256-CTR over the pool. Extracts a 32-byte
 	 * AES key via SHA-256(pool), then expands to out_len bytes via
 	 * AES-ECB on a 128-bit counter. Per crypto consultant guidance —
 	 * see extract_via_aes_ctr() for full rationale. */
-	if (extract_via_aes_ctr(pool, sizeof(pool), out, out_len) != 0) {
-		Utils::cryptoPanicReboot("AES-CTR seed extraction failed");
+	char extract_err[80] = "AES-CTR seed extraction failed";
+	if (extract_via_aes_ctr(pool, sizeof(pool), out, out_len,
+				extract_err, sizeof(extract_err)) != 0) {
+		Utils::cryptoPanicReboot(extract_err);
 	}
 
 	/* Output sanity check — reject all-zero / all-0xFF (catastrophic
